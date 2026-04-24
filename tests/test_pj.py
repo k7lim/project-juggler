@@ -1,4 +1,4 @@
-"""Tests for pj Phase 1: envelope, cass_facade, state, discover, cache, cli, pretty."""
+"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,7 @@ import pj.cache as cache
 import pj.discover as discover
 import pj.pretty as pretty
 import pj.cli as cli
+import pj.annotate as annotate
 
 
 # --- envelope ---
@@ -344,3 +345,187 @@ def test_project_id_deterministic():
     assert discover.project_id("/tmp/foo") == discover.project_id("/tmp/foo")
     assert discover.project_id("/tmp/foo") != discover.project_id("/tmp/bar")
     assert len(discover.project_id("/tmp/foo")) == 8
+
+
+# --- annotate ---
+
+def test_annotate_note():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            event = annotate.note("/tmp/my-proj", "fix the build")
+
+        assert event["type"] == "note"
+        assert event["text"] == "fix the build"
+        assert event["project_id"] == discover.project_id("/tmp/my-proj")
+        assert event["project_path"] == "/tmp/my-proj"
+        assert "timestamp" in event
+
+        lines = ann_path.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert json.loads(lines[0]) == event
+
+
+def test_annotate_prioritize():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            event = annotate.prioritize("/tmp/proj", "high")
+
+    assert event["type"] == "priority"
+    assert event["value"] == "high"
+
+
+def test_annotate_prioritize_invalid():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            try:
+                annotate.prioritize("/tmp/proj", "urgent")
+                assert False, "Should have raised ValueError"
+            except ValueError as e:
+                assert "urgent" in str(e)
+
+        assert not ann_path.exists()
+
+
+def test_annotate_archive():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            event = annotate.archive("/tmp/proj")
+
+    assert event["type"] == "archive"
+    assert event["project_id"] == discover.project_id("/tmp/proj")
+
+
+def test_annotate_tag():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            event = annotate.tag("/tmp/proj", "infra")
+
+    assert event["type"] == "tag"
+    assert event["tag"] == "infra"
+
+
+def test_annotate_append_only():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            annotate.note("/tmp/proj", "first")
+            annotate.note("/tmp/proj", "second")
+            annotate.prioritize("/tmp/proj", "medium")
+
+        lines = ann_path.read_text().strip().split("\n")
+        assert len(lines) == 3
+        assert json.loads(lines[0])["text"] == "first"
+        assert json.loads(lines[1])["text"] == "second"
+        assert json.loads(lines[2])["value"] == "medium"
+
+
+def test_annotate_creates_parent_dirs():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "nested" / "dir" / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            annotate.note("/tmp/proj", "test")
+
+        assert ann_path.exists()
+
+
+# --- discover annotation replay integration ---
+
+def test_discover_replays_annotations_integration():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/tagged-proj", "agents": ["claude"], "session_count": 2, "last_active": now_iso}]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            annotate.prioritize("/tmp/tagged-proj", "high")
+            annotate.tag("/tmp/tagged-proj", "ml")
+            annotate.tag("/tmp/tagged-proj", "infra")
+            annotate.note("/tmp/tagged-proj", "next: retrain model")
+
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+            projects, total = discover.discover()
+
+        assert total == 1
+        p = projects[0]
+        assert p["priority"] == "high"
+        assert sorted(p["tags"]) == ["infra", "ml"]
+
+
+def test_discover_archive_state():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/arch-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            annotate.archive("/tmp/arch-proj")
+
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+            projects, total = discover.discover(state_filter="archived")
+
+        assert total == 1
+        assert projects[0]["state"] == "archived"
+
+
+# --- cli actuator commands ---
+
+def test_cli_note(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["note", "/tmp/proj", "remember to refactor"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"]["type"] == "note"
+    assert parsed["data"]["text"] == "remember to refactor"
+
+
+def test_cli_prioritize(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["prioritize", "/tmp/proj", "high"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"]["type"] == "priority"
+    assert parsed["data"]["value"] == "high"
+
+
+def test_cli_archive(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["archive", "/tmp/proj"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"]["type"] == "archive"
+
+
+def test_cli_tag(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["tag", "/tmp/proj", "backend"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"]["type"] == "tag"
+    assert parsed["data"]["tag"] == "backend"
