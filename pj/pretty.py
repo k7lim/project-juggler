@@ -2,7 +2,41 @@ from __future__ import annotations
 
 """Human-readable table rendering for --pretty output."""
 
+import re
+import sys
 from datetime import datetime, timezone
+
+_STATE_COLORS = {"active": "32", "stale": "33", "dormant": "31", "blocked": "1;31", "archived": "2"}
+_PRI_COLORS = {"high": "31", "medium": "33", "low": "2"}
+
+
+def _use_color() -> bool:
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+def _c(code: str, text: str) -> str:
+    if not _use_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _color_state(s: str) -> str:
+    return _c(_STATE_COLORS.get(s, "0"), s) if s in _STATE_COLORS else s
+
+
+def _color_pri(p: str) -> str:
+    return _c(_PRI_COLORS.get(p, "0"), p) if p in _PRI_COLORS else p
+
+
+def _color_score(v: float) -> str:
+    code = "32" if v >= 0.7 else "33" if v >= 0.4 else "31"
+    return _c(code, f"{v:.2f}")
+
+
+def _pad(text: str, width: int) -> str:
+    """Pad text to width, accounting for ANSI escape sequences."""
+    visible_len = len(re.sub(r"\033\[[0-9;]*m", "", text))
+    return text + " " * max(0, width - visible_len)
 
 
 def _relative_time(iso: str | None) -> str:
@@ -29,11 +63,11 @@ def _relative_time(iso: str | None) -> str:
 
 
 def print_status(data: dict) -> None:
-    print(f"Project: {data.get('name', '?')}")
+    print(f"Project: {_c('1', data.get('name', '?'))}")
     print(f"  Path:     {data.get('path', '?')}")
     print(f"  ID:       {data.get('id', '?')}")
-    print(f"  State:    {data.get('state', '?')}")
-    print(f"  Priority: {data.get('priority', 'none')}")
+    print(f"  State:    {_color_state(data.get('state', '?'))}")
+    print(f"  Priority: {_color_pri(data.get('priority', 'none'))}")
     print(f"  Agents:   {', '.join(data.get('agents', []))}")
     print(f"  Sessions: {data.get('session_count', 0)}")
     print(f"  Active:   {_relative_time(data.get('last_active'))}")
@@ -76,19 +110,22 @@ def print_projects(projects: list[dict], total: int, offset: int, limit: int) ->
         ("LAST ACTIVE", 11),
     ]
 
-    header = "  ".join(h.ljust(w) for h, w in cols)
+    header = "  ".join(_c("1", h.ljust(w)) for h, w in cols)
     print(header)
-    print("-" * len(header))
+    sep_len = sum(w for _, w in cols) + 2 * (len(cols) - 1)
+    print("-" * sep_len)
 
     for p in projects:
         agents = ",".join(p.get("agents", []))
+        state_str = p.get("state", "")
+        pri_str = p.get("priority", "none")
         row = [
-            p.get("id", "")[:8].ljust(8),
-            p.get("state", "").ljust(8),
-            p.get("name", "")[:28].ljust(28),
-            agents[:16].ljust(16),
+            _pad(p.get("id", "")[:8], 8),
+            _pad(_color_state(state_str), 8),
+            _pad(_c("1", p.get("name", "")[:28]), 28),
+            _pad(agents[:16], 16),
             str(p.get("session_count", 0)).rjust(4),
-            p.get("priority", "none")[:6].ljust(6),
+            _pad(_color_pri(pri_str[:6]), 6),
             _relative_time(p.get("last_active")).ljust(11),
         ]
         print("  ".join(row))
@@ -111,17 +148,19 @@ def print_next(scored: list[dict]) -> None:
         ("REASON", 40),
     ]
 
-    header = "  ".join(h.ljust(w) for h, w in cols)
+    header = "  ".join(_c("1", h.ljust(w)) for h, w in cols)
+    sep_len = sum(w for _, w in cols) + 2 * (len(cols) - 1)
     print(header)
-    print("-" * len(header))
+    print("-" * sep_len)
 
     for i, p in enumerate(scored, 1):
+        score = p.get("score", 0)
         row = [
             str(i).rjust(3),
-            f"{p.get('score', 0):.2f}".rjust(5),
-            p.get("name", "")[:28].ljust(28),
-            p.get("state", "").ljust(8),
-            p.get("priority", "none")[:6].ljust(6),
+            _pad(_color_score(score), 5),
+            _pad(_c("1", p.get("name", "")[:28]), 28),
+            _pad(_color_state(p.get("state", "")), 8),
+            _pad(_color_pri(p.get("priority", "none")[:6]), 6),
             p.get("reason", "")[:40].ljust(40),
         ]
         print("  ".join(row))
@@ -140,15 +179,16 @@ def print_search(results: list[dict], query: str) -> None:
         ("MATCH", 30),
     ]
 
-    header = "  ".join(h.ljust(w) for h, w in cols)
+    header = "  ".join(_c("1", h.ljust(w)) for h, w in cols)
+    sep_len = sum(w for _, w in cols) + 2 * (len(cols) - 1)
     print(header)
-    print("-" * len(header))
+    print("-" * sep_len)
 
     for p in results:
         match = ", ".join(p.get("match_fields", []))
         row = [
-            p.get("name", "")[:28].ljust(28),
-            p.get("state", "")[:8].ljust(8),
+            _pad(_c("1", p.get("name", "")[:28]), 28),
+            _pad(_color_state(p.get("state", "")[:8]), 8),
             match[:30].ljust(30),
         ]
         print("  ".join(row))

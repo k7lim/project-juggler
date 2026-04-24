@@ -1256,3 +1256,159 @@ def test_pretty_status_minimal(capsys):
     assert "bare-proj" in out
     assert "dormant" in out
     assert "Resume:" not in out
+
+
+# --- Phase 5: tag filter ---
+
+def test_discover_tag_filter():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/tmp/tagged-a", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/tmp/tagged-b", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/tmp/untagged", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+    ]
+    pid_a = discover.project_id("/tmp/tagged-a")
+    pid_b = discover.project_id("/tmp/tagged-b")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps({"type": "tag", "project_id": pid_a, "project_path": "/tmp/tagged-a", "tag": "ml"}) + "\n")
+        f.write(json.dumps({"type": "tag", "project_id": pid_b, "project_path": "/tmp/tagged-b", "tag": "infra"}) + "\n")
+        ann_path = Path(f.name)
+
+    try:
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+            projects, total = discover.discover(tag_filter="ml")
+
+        assert total == 1
+        assert projects[0]["name"] == "tagged-a"
+        assert "ml" in projects[0]["tags"]
+    finally:
+        os.unlink(ann_path)
+
+
+def test_discover_tag_filter_no_match():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+        projects, total = discover.discover(tag_filter="nonexistent")
+    assert total == 0
+    assert projects == []
+
+
+def test_cli_list_tag_filter(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/tmp/ml-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/tmp/web-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+    ]
+    pid_ml = discover.project_id("/tmp/ml-proj")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps({"type": "tag", "project_id": pid_ml, "project_path": "/tmp/ml-proj", "tag": "ml"}) + "\n")
+        ann_path = Path(f.name)
+
+    try:
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["list", "--tag", "ml"])
+
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["success"] is True
+        assert parsed["meta"]["total"] == 1
+        assert parsed["data"][0]["name"] == "ml-proj"
+    finally:
+        os.unlink(ann_path)
+
+
+# --- Phase 5: latency_ms in all envelopes ---
+
+def test_cli_list_has_latency(capsys):
+    fake = [{"path": "/tmp/t", "agents": ["claude"], "session_count": 1,
+             "last_active": datetime.now(timezone.utc).isoformat()}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+        cli.main(["list"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert "latency_ms" in parsed["meta"]
+    assert isinstance(parsed["meta"]["latency_ms"], int)
+
+
+def test_cli_next_has_latency(capsys):
+    fake = [{"path": "/tmp/t", "agents": ["claude"], "session_count": 1,
+             "last_active": datetime.now(timezone.utc).isoformat()}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
+        cli.main(["next"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert "latency_ms" in parsed["meta"]
+
+
+def test_cli_annotate_has_latency(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ann_path = Path(tmpdir) / "annotations.jsonl"
+        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+            cli.main(["note", "/tmp/proj", "test"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert "latency_ms" in parsed["meta"]
+
+
+# --- Phase 5: pretty color helpers (no TTY = no ANSI) ---
+
+def test_pretty_no_color_when_not_tty(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [
+        {"id": "abcd1234", "state": "active", "name": "color-test",
+         "agents": ["claude"], "session_count": 1,
+         "priority": "high", "last_active": now_iso},
+    ]
+    pretty.print_projects(projects, 1, 0, 20)
+    out = capsys.readouterr().out
+    assert "\033[" not in out
+    assert "color-test" in out
+    assert "active" in out
+
+
+def test_pretty_pad_plain():
+    assert len(pretty._pad("hello", 10)) == 10
+    assert pretty._pad("hello", 3) == "hello"
+
+
+def test_pretty_pad_with_ansi():
+    colored = "\033[32mhello\033[0m"
+    padded = pretty._pad(colored, 10)
+    assert padded.startswith("\033[32m")
+    import re
+    visible = re.sub(r"\033\[[0-9;]*m", "", padded)
+    assert len(visible) == 10
+
+
+def test_pretty_color_state():
+    with mock.patch.object(pretty, "_use_color", return_value=False):
+        assert pretty._color_state("active") == "active"
+    with mock.patch.object(pretty, "_use_color", return_value=True):
+        result = pretty._color_state("active")
+        assert "\033[32m" in result
+        assert "active" in result
+
+
+def test_pretty_color_score():
+    with mock.patch.object(pretty, "_use_color", return_value=False):
+        assert pretty._color_score(0.75) == "0.75"
+    with mock.patch.object(pretty, "_use_color", return_value=True):
+        assert "\033[32m" in pretty._color_score(0.75)
+        assert "\033[33m" in pretty._color_score(0.50)
+        assert "\033[31m" in pretty._color_score(0.20)

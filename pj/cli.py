@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="last-active",
         help="Sort order (default: last-active)",
     )
+    ls.add_argument("--tag", help="Filter by tag")
     ls.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     ls.add_argument("--offset", type=int, default=0, help="Skip N results (default: 0)")
 
@@ -70,6 +71,7 @@ def _cmd_list(args: argparse.Namespace) -> None:
     start = time.monotonic()
     projects, total = discover.discover(
         state_filter=args.state,
+        tag_filter=args.tag,
         sort=args.sort,
         limit=args.limit,
         offset=args.offset,

@@ -118,6 +118,7 @@ def resolve_project(query: str) -> dict | None:
 
 def discover(
     state_filter: str | None = None,
+    tag_filter: str | None = None,
     sort: str = "last-active",
     limit: int = 20,
     offset: int = 0,
@@ -148,6 +149,9 @@ def discover(
 
     if state_filter:
         projects = [p for p in projects if p["state"] == state_filter]
+
+    if tag_filter:
+        projects = [p for p in projects if tag_filter in p.get("tags", [])]
 
     total = len(projects)
 
