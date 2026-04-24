@@ -98,6 +98,41 @@ def recent_session_counts(days: int = 7) -> dict[str, int]:
     return {path: count for path, count in rows}
 
 
+def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
+    """All sessions for a specific workspace, most recent first."""
+    db = db_path()
+    if db is None:
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT c.id, COALESCE(a.slug, 'unknown'), c.title, c.started_at "
+            "FROM conversations c "
+            "JOIN workspaces w ON c.workspace_id = w.id "
+            "LEFT JOIN agents a ON c.agent_id = a.id "
+            "WHERE w.path = ? "
+            "ORDER BY c.started_at DESC "
+            "LIMIT ?",
+            (workspace_path, limit),
+        ).fetchall()
+        conn.close()
+    except (sqlite3.Error, OSError):
+        return []
+
+    results = []
+    for session_id, agent, title, started_at_ms in rows:
+        iso = None
+        if started_at_ms:
+            iso = datetime.fromtimestamp(started_at_ms / 1000, tz=timezone.utc).isoformat()
+        results.append({
+            "session_id": session_id,
+            "agent": agent,
+            "title": title,
+            "started_at": iso,
+        })
+    return results
+
+
 def search_sessions(query: str, limit: int = 20) -> list[dict]:
     """Search session titles for substring matches."""
     db = db_path()

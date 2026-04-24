@@ -1,4 +1,4 @@
-"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate, schedule, search."""
+"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate, schedule, search, resume."""
 from __future__ import annotations
 
 import json
@@ -19,6 +19,7 @@ import pj.pretty as pretty
 import pj.cli as cli
 import pj.annotate as annotate
 import pj.schedule as schedule
+import pj.resume as resume
 import pj.search as search_mod
 
 
@@ -949,3 +950,309 @@ def test_discover_latest_note_none_when_no_notes():
          mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
         projects, _ = discover.discover()
     assert projects[0]["latest_note"] is None
+
+
+# --- resume ---
+
+def test_resume_command_claude():
+    cmd = resume.resume_command("claude", "abc-123")
+    assert cmd == "claude --resume abc-123"
+
+
+def test_resume_command_codex():
+    cmd = resume.resume_command("codex", "sess-456")
+    assert cmd == "codex --resume sess-456"
+
+
+def test_resume_command_unknown_agent():
+    cmd = resume.resume_command("new-agent", "s1")
+    assert cmd == "new-agent --resume s1"
+
+
+def test_resume_command_quotes_special_chars():
+    cmd = resume.resume_command("claude", "id with spaces")
+    assert "id with spaces" in cmd
+    assert cmd.startswith("claude --resume")
+
+
+def test_full_resume_command():
+    cmd = resume.full_resume_command("/home/user/proj", "claude", "abc-123")
+    assert cmd == "cd /home/user/proj && claude --resume abc-123"
+
+
+def test_full_resume_command_quotes_path():
+    cmd = resume.full_resume_command("/home/user/my project", "claude", "s1")
+    assert "my project" in cmd
+    assert cmd.startswith("cd ")
+    assert "&& claude --resume" in cmd
+
+
+# --- cass_facade project_sessions ---
+
+def test_cass_facade_project_sessions():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db(db)
+        with mock.patch.object(cass_facade, "db_path", return_value=db):
+            sessions = cass_facade.project_sessions("/home/user/project-a")
+    assert len(sessions) == 3
+    assert sessions[0]["agent"] in ("claude", "codex")
+    assert sessions[0]["started_at"] >= sessions[1]["started_at"]
+
+
+def test_cass_facade_project_sessions_no_match():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db(db)
+        with mock.patch.object(cass_facade, "db_path", return_value=db):
+            sessions = cass_facade.project_sessions("/nonexistent/path")
+    assert sessions == []
+
+
+def test_cass_facade_project_sessions_no_db():
+    with mock.patch.object(cass_facade, "db_path", return_value=None):
+        assert cass_facade.project_sessions("/any/path") == []
+
+
+# --- discover resolve_project ---
+
+def _mock_discover_with(fake_projects):
+    """Context manager that mocks discover to return fake_projects."""
+    return (
+        mock.patch.object(cass_facade, "list_projects", return_value=fake_projects),
+        mock.patch.object(cache, "load", return_value=None),
+        mock.patch.object(cache, "save"),
+        mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")),
+    )
+
+
+def test_resolve_project_by_name():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/home/user/api-gateway", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/home/user/web-app", "agents": ["codex"], "session_count": 2, "last_active": now_iso},
+    ]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project("api-gateway")
+    assert result is not None
+    assert result["name"] == "api-gateway"
+
+
+def test_resolve_project_by_id_prefix():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/home/user/my-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    pid = discover.project_id("/home/user/my-proj")
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project(pid[:4])
+    assert result is not None
+    assert result["id"] == pid
+
+
+def test_resolve_project_by_path():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/home/user/my-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project("/home/user/my-proj")
+    assert result is not None
+    assert result["path"] == "/home/user/my-proj"
+
+
+def test_resolve_project_substring():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/home/user/jam-sesh", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/home/user/web-app", "agents": ["codex"], "session_count": 1, "last_active": now_iso},
+    ]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project("jam")
+    assert result is not None
+    assert result["name"] == "jam-sesh"
+
+
+def test_resolve_project_ambiguous_returns_none():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/home/user/api-gateway", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/home/user/api-server", "agents": ["codex"], "session_count": 1, "last_active": now_iso},
+    ]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project("api")
+    assert result is None
+
+
+def test_resolve_project_no_match():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/home/user/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project("zzz_nonexistent")
+    assert result is None
+
+
+# --- cli status ---
+
+def test_cli_status_json(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/status-test", "agents": ["claude"], "session_count": 3, "last_active": now_iso}]
+    fake_sessions = [
+        {"session_id": "s1", "agent": "claude", "title": "fixing bugs", "started_at": now_iso},
+        {"session_id": "s2", "agent": "claude", "title": "adding tests", "started_at": now_iso},
+    ]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
+        cli.main(["status", "status-test"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"]["name"] == "status-test"
+    assert len(parsed["data"]["sessions"]) == 2
+    assert "resume_cmd" in parsed["data"]
+    assert "claude --resume" in parsed["data"]["resume_cmd"]
+
+
+def test_cli_status_pretty(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/status-pretty", "agents": ["claude", "codex"], "session_count": 5, "last_active": now_iso}]
+    fake_sessions = [
+        {"session_id": "s1", "agent": "claude", "title": "work session", "started_at": now_iso},
+    ]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
+        cli.main(["status", "--pretty", "status-pretty"])
+
+    out = capsys.readouterr().out
+    assert "status-pretty" in out
+    assert "claude, codex" in out
+    assert "Resume:" in out
+
+
+def test_cli_status_not_found(capsys):
+    with mock.patch.object(cass_facade, "list_projects", return_value=[]), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+        try:
+            cli.main(["status", "nonexistent"])
+        except SystemExit:
+            pass
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is False
+
+
+# --- cli resume ---
+
+def test_cli_resume(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/resume-test", "agents": ["codex"], "session_count": 1, "last_active": now_iso}]
+    fake_sessions = [{"session_id": "sess-abc", "agent": "codex", "title": "session", "started_at": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
+        cli.main(["resume", "resume-test"])
+
+    out = capsys.readouterr().out.strip()
+    assert out == "cd /tmp/resume-test && codex --resume sess-abc"
+
+
+def test_cli_resume_not_found(capsys):
+    with mock.patch.object(cass_facade, "list_projects", return_value=[]), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+        try:
+            cli.main(["resume", "nonexistent"])
+        except SystemExit:
+            pass
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is False
+
+
+def test_cli_resume_no_sessions(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/no-sess", "agents": ["claude"], "session_count": 0, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=[]):
+        try:
+            cli.main(["resume", "no-sess"])
+        except SystemExit:
+            pass
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is False
+    assert "No sessions" in parsed["meta"]["error"]
+
+
+# --- pretty status ---
+
+def test_pretty_status(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    data = {
+        "name": "my-proj",
+        "path": "/home/user/my-proj",
+        "id": "abcd1234",
+        "state": "active",
+        "priority": "high",
+        "agents": ["claude", "codex"],
+        "session_count": 10,
+        "last_active": now_iso,
+        "tags": ["ml", "infra"],
+        "latest_note": "next: retrain model",
+        "sessions": [
+            {"session_id": "s1-long-id-here", "agent": "claude", "title": "training run", "started_at": now_iso},
+        ],
+        "resume_cmd": "cd /home/user/my-proj && claude --resume s1-long-id-here",
+    }
+    pretty.print_status(data)
+    out = capsys.readouterr().out
+    assert "my-proj" in out
+    assert "active" in out
+    assert "high" in out
+    assert "claude, codex" in out
+    assert "ml, infra" in out
+    assert "retrain model" in out
+    assert "training run" in out
+    assert "Resume:" in out
+
+
+def test_pretty_status_minimal(capsys):
+    data = {
+        "name": "bare-proj",
+        "path": "/tmp/bare",
+        "id": "deadbeef",
+        "state": "dormant",
+        "priority": "none",
+        "agents": [],
+        "session_count": 0,
+        "last_active": None,
+        "tags": [],
+        "latest_note": None,
+        "sessions": [],
+        "resume_cmd": None,
+    }
+    pretty.print_status(data)
+    out = capsys.readouterr().out
+    assert "bare-proj" in out
+    assert "dormant" in out
+    assert "Resume:" not in out

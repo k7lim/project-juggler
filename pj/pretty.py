@@ -28,6 +28,39 @@ def _relative_time(iso: str | None) -> str:
         return "unknown"
 
 
+def print_status(data: dict) -> None:
+    print(f"Project: {data.get('name', '?')}")
+    print(f"  Path:     {data.get('path', '?')}")
+    print(f"  ID:       {data.get('id', '?')}")
+    print(f"  State:    {data.get('state', '?')}")
+    print(f"  Priority: {data.get('priority', 'none')}")
+    print(f"  Agents:   {', '.join(data.get('agents', []))}")
+    print(f"  Sessions: {data.get('session_count', 0)}")
+    print(f"  Active:   {_relative_time(data.get('last_active'))}")
+
+    tags = data.get("tags", [])
+    if tags:
+        print(f"  Tags:     {', '.join(tags)}")
+
+    note = data.get("latest_note")
+    if note:
+        print(f"  Note:     {note}")
+
+    sessions = data.get("sessions", [])
+    if sessions:
+        print(f"\nRecent sessions ({len(sessions)}):")
+        for s in sessions:
+            agent = s.get("agent", "?")
+            title = s.get("title") or "(untitled)"
+            when = _relative_time(s.get("started_at"))
+            sid = s.get("session_id", "")[:12]
+            print(f"  [{agent}] {title}  ({when}, {sid})")
+
+    resume_cmd = data.get("resume_cmd")
+    if resume_cmd:
+        print(f"\nResume:\n  {resume_cmd}")
+
+
 def print_projects(projects: list[dict], total: int, offset: int, limit: int) -> None:
     if not projects:
         print("No projects found.")

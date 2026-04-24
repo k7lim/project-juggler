@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from . import annotate, discover, envelope, pretty, schedule
+from . import annotate, cass_facade, discover, envelope, pretty, resume, schedule
 from . import search as search_mod
 
 
@@ -50,6 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     next_p.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     next_p.add_argument("--pretty", action="store_true", help="Human-readable output")
 
+    stat = sub.add_parser("status", help="Deep view of a project: sessions, notes, resume cmd")
+    stat.add_argument("project", help="Project name, path, or id prefix")
+    stat.add_argument("--pretty", action="store_true", help="Human-readable output")
+    stat.add_argument("--sessions", type=int, default=10, help="Max sessions to show (default: 10)")
+
+    res = sub.add_parser("resume", help="Output cd + agent --resume for most recent session")
+    res.add_argument("project", help="Project name, path, or id prefix")
+
     srch = sub.add_parser("search", help="Search projects by keyword")
     srch.add_argument("query", help="Search query")
     srch.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
@@ -94,6 +102,56 @@ def _cmd_next(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
 
 
+def _cmd_status(args: argparse.Namespace) -> None:
+    start = time.monotonic()
+    project = discover.resolve_project(args.project)
+    if project is None:
+        env = envelope.err(f"No project matching {args.project!r}")
+        print(envelope.to_json(env))
+        sys.exit(1)
+
+    sessions = cass_facade.project_sessions(project["path"], limit=args.sessions)
+    resume_cmd = None
+    if sessions:
+        latest = sessions[0]
+        resume_cmd = resume.full_resume_command(
+            project["path"], latest["agent"], latest["session_id"],
+        )
+
+    status_data = {
+        **project,
+        "sessions": sessions,
+        "resume_cmd": resume_cmd,
+    }
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if args.pretty:
+        pretty.print_status(status_data)
+    else:
+        env = envelope.ok(status_data, latency_ms=latency_ms)
+        print(envelope.to_json(env))
+
+
+def _cmd_resume(args: argparse.Namespace) -> None:
+    project = discover.resolve_project(args.project)
+    if project is None:
+        env = envelope.err(f"No project matching {args.project!r}")
+        print(envelope.to_json(env))
+        sys.exit(1)
+
+    sessions = cass_facade.project_sessions(project["path"], limit=1)
+    if not sessions:
+        env = envelope.err(f"No sessions found for {project['name']}")
+        print(envelope.to_json(env))
+        sys.exit(1)
+
+    latest = sessions[0]
+    cmd = resume.full_resume_command(
+        project["path"], latest["agent"], latest["session_id"],
+    )
+    print(cmd)
+
+
 def _cmd_search(args: argparse.Namespace) -> None:
     start = time.monotonic()
     results = search_mod.search(args.query, limit=args.limit)
@@ -136,5 +194,9 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_annotate(lambda: annotate.tag(args.project, args.tag))
     elif args.command == "next":
         _cmd_next(args)
+    elif args.command == "status":
+        _cmd_status(args)
+    elif args.command == "resume":
+        _cmd_resume(args)
     elif args.command == "search":
         _cmd_search(args)

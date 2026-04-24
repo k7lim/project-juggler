@@ -79,6 +79,43 @@ def _build_project(path: str, cass_data: dict | None, ann: dict) -> dict:
     }
 
 
+def resolve_project(query: str) -> dict | None:
+    """Fuzzy-match a project by name, path substring, or id prefix."""
+    all_projects, _ = discover(limit=9999)
+    if not all_projects:
+        return None
+
+    query_lower = query.lower()
+
+    for p in all_projects:
+        if p["id"].startswith(query_lower):
+            return p
+
+    for p in all_projects:
+        if p["name"].lower() == query_lower:
+            return p
+
+    for p in all_projects:
+        if p["path"].lower() == query_lower:
+            return p
+
+    matches = []
+    for p in all_projects:
+        if query_lower in p["name"].lower():
+            matches.append(p)
+    if len(matches) == 1:
+        return matches[0]
+
+    if not matches:
+        for p in all_projects:
+            if query_lower in p["path"].lower():
+                matches.append(p)
+        if len(matches) == 1:
+            return matches[0]
+
+    return None
+
+
 def discover(
     state_filter: str | None = None,
     sort: str = "last-active",
