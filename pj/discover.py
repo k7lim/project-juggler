@@ -75,6 +75,7 @@ def _build_project(path: str, cass_data: dict | None, ann: dict) -> dict:
         "state": state.derive(last_active, archived=archived, blocked=blocked),
         "priority": ann.get("priority", "none"),
         "tags": ann.get("tags", []),
+        "latest_note": latest_note,
     }
 
 

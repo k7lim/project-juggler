@@ -1,4 +1,4 @@
-"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate."""
+"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate, schedule, search."""
 from __future__ import annotations
 
 import json
@@ -18,6 +18,8 @@ import pj.discover as discover
 import pj.pretty as pretty
 import pj.cli as cli
 import pj.annotate as annotate
+import pj.schedule as schedule
+import pj.search as search_mod
 
 
 # --- envelope ---
@@ -529,3 +531,421 @@ def test_cli_tag(capsys):
     assert parsed["success"] is True
     assert parsed["data"]["type"] == "tag"
     assert parsed["data"]["tag"] == "backend"
+
+
+# --- schedule ---
+
+def _make_project(path, last_active=None, priority="none", state_val="active",
+                  session_count=1, latest_note=None, agents=None):
+    return {
+        "id": discover.project_id(path),
+        "name": path.rsplit("/", 1)[-1],
+        "path": path,
+        "agents": agents or ["claude"],
+        "session_count": session_count,
+        "last_active": last_active,
+        "state": state_val,
+        "priority": priority,
+        "tags": [],
+        "latest_note": latest_note,
+    }
+
+
+def test_schedule_scores_basic():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [
+        _make_project("/tmp/high-pri", last_active=now_iso, priority="high"),
+        _make_project("/tmp/low-pri", last_active=now_iso, priority="low"),
+    ]
+    scored = schedule.score_projects(projects, recent_counts={})
+    assert len(scored) == 2
+    assert scored[0]["path"] == "/tmp/high-pri"
+    assert scored[0]["score"] > scored[1]["score"]
+
+
+def test_schedule_excludes_archived_and_blocked():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [
+        _make_project("/tmp/active", last_active=now_iso),
+        _make_project("/tmp/archived", last_active=now_iso, state_val="archived"),
+        _make_project("/tmp/blocked", last_active=now_iso, state_val="blocked"),
+    ]
+    scored = schedule.score_projects(projects, recent_counts={})
+    assert len(scored) == 1
+    assert scored[0]["path"] == "/tmp/active"
+
+
+def test_schedule_factors_present():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [_make_project("/tmp/proj", last_active=now_iso)]
+    scored = schedule.score_projects(projects, recent_counts={})
+    assert "factors" in scored[0]
+    assert "score" in scored[0]
+    assert "reason" in scored[0]
+    for key in ("priority", "recency", "momentum", "staleness", "actionable"):
+        assert key in scored[0]["factors"]
+
+
+def test_schedule_momentum():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [
+        _make_project("/tmp/busy", last_active=now_iso),
+        _make_project("/tmp/idle", last_active=now_iso),
+    ]
+    recent = {"/tmp/busy": 10, "/tmp/idle": 1}
+    scored = schedule.score_projects(projects, recent_counts=recent)
+    busy = next(s for s in scored if s["path"] == "/tmp/busy")
+    idle = next(s for s in scored if s["path"] == "/tmp/idle")
+    assert busy["factors"]["momentum"] > idle["factors"]["momentum"]
+
+
+def test_schedule_staleness_boost():
+    ts_5d = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    ts_1d = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    projects = [
+        _make_project("/tmp/stale-ish", last_active=ts_5d, state_val="active"),
+        _make_project("/tmp/fresh", last_active=ts_1d, state_val="active"),
+    ]
+    scored = schedule.score_projects(projects, recent_counts={})
+    staleish = next(s for s in scored if s["path"] == "/tmp/stale-ish")
+    fresh = next(s for s in scored if s["path"] == "/tmp/fresh")
+    assert staleish["factors"]["staleness"] == 0.8
+    assert fresh["factors"]["staleness"] == 0.0
+
+
+def test_schedule_actionable_note():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [
+        _make_project("/tmp/with-note", last_active=now_iso, latest_note="next: fix tests"),
+        _make_project("/tmp/no-note", last_active=now_iso),
+        _make_project("/tmp/blocked-note", last_active=now_iso, latest_note="blocked: waiting on API"),
+    ]
+    scored = schedule.score_projects(projects, recent_counts={})
+    with_note = next(s for s in scored if s["path"] == "/tmp/with-note")
+    no_note = next(s for s in scored if s["path"] == "/tmp/no-note")
+    assert with_note["factors"]["actionable"] == 1.0
+    assert no_note["factors"]["actionable"] == 0.0
+
+
+def test_schedule_reason_string():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [_make_project("/tmp/high", last_active=now_iso, priority="high",
+                              latest_note="next: ship it")]
+    scored = schedule.score_projects(projects, recent_counts={})
+    assert "high priority" in scored[0]["reason"]
+    assert "has next step" in scored[0]["reason"]
+
+
+def test_schedule_no_cass_fallback():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    projects = [_make_project("/tmp/proj", last_active=now_iso)]
+    with mock.patch.object(cass_facade, "db_path", return_value=None):
+        scored = schedule.score_projects(projects)
+    assert len(scored) == 1
+    assert scored[0]["factors"]["momentum"] == 0.0
+
+
+def test_schedule_recency_decay():
+    ts_recent = datetime.now(timezone.utc).isoformat()
+    ts_old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    projects = [
+        _make_project("/tmp/recent", last_active=ts_recent),
+        _make_project("/tmp/old", last_active=ts_old),
+    ]
+    scored = schedule.score_projects(projects, recent_counts={})
+    recent = next(s for s in scored if s["path"] == "/tmp/recent")
+    old = next(s for s in scored if s["path"] == "/tmp/old")
+    assert recent["factors"]["recency"] > old["factors"]["recency"]
+
+
+def test_schedule_none_last_active():
+    projects = [_make_project("/tmp/no-ts", last_active=None, state_val="dormant")]
+    scored = schedule.score_projects(projects, recent_counts={})
+    assert len(scored) == 1
+    assert scored[0]["factors"]["recency"] < 0.01
+
+
+# --- cass_facade recent/search ---
+
+def test_cass_facade_recent_session_counts():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db(db)
+        with mock.patch.object(cass_facade, "db_path", return_value=db):
+            counts = cass_facade.recent_session_counts(days=7)
+    assert "/home/user/project-a" in counts
+    assert counts["/home/user/project-a"] >= 1
+
+
+def test_cass_facade_recent_session_counts_no_db():
+    with mock.patch.object(cass_facade, "db_path", return_value=None):
+        assert cass_facade.recent_session_counts() == {}
+
+
+def test_cass_facade_search_sessions():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db(db)
+        with mock.patch.object(cass_facade, "db_path", return_value=db):
+            results = cass_facade.search_sessions("t1")
+    assert len(results) >= 1
+    assert results[0]["title"] == "t1"
+    assert results[0]["path"] == "/home/user/project-a"
+
+
+def test_cass_facade_search_sessions_no_match():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db(db)
+        with mock.patch.object(cass_facade, "db_path", return_value=db):
+            results = cass_facade.search_sessions("nonexistent_query_xyz")
+    assert results == []
+
+
+def test_cass_facade_search_sessions_no_db():
+    with mock.patch.object(cass_facade, "db_path", return_value=None):
+        assert cass_facade.search_sessions("test") == []
+
+
+# --- search ---
+
+def test_search_by_name():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/api-gateway", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+        results = search_mod.search("api")
+    assert len(results) == 1
+    assert "name" in results[0]["match_fields"]
+
+
+def test_search_by_note():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/my-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    pid = discover.project_id("/tmp/my-proj")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps({"type": "note", "project_id": pid, "project_path": "/tmp/my-proj",
+                            "text": "fix the authentication bug"}) + "\n")
+        ann_path = Path(f.name)
+
+    try:
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path), \
+             mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+            results = search_mod.search("authentication")
+        assert len(results) == 1
+        assert "note" in results[0]["match_fields"]
+    finally:
+        os.unlink(ann_path)
+
+
+def test_search_by_session_title():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    session_hits = [{"session_id": "s1", "path": "/tmp/proj", "agent": "claude",
+                     "title": "debugging memory leak", "started_at": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits):
+        results = search_mod.search("memory leak")
+    assert len(results) == 1
+    assert "session_title" in results[0]["match_fields"]
+    assert "matching_titles" in results[0]
+
+
+def test_search_no_results():
+    fake = [{"path": "/tmp/proj", "agents": ["claude"], "session_count": 1,
+             "last_active": datetime.now(timezone.utc).isoformat()}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+        results = search_mod.search("zzz_no_match_zzz")
+    assert results == []
+
+
+def test_search_by_tag():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/tagged", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    pid = discover.project_id("/tmp/tagged")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps({"type": "tag", "project_id": pid, "project_path": "/tmp/tagged",
+                            "tag": "infrastructure"}) + "\n")
+        ann_path = Path(f.name)
+
+    try:
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path), \
+             mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+            results = search_mod.search("infra")
+        assert len(results) == 1
+        assert "tag" in results[0]["match_fields"]
+    finally:
+        os.unlink(ann_path)
+
+
+def test_search_deduplicates():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/api-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    session_hits = [{"session_id": "s1", "path": "/tmp/api-proj", "agent": "claude",
+                     "title": "api endpoint work", "started_at": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits):
+        results = search_mod.search("api")
+    assert len(results) == 1
+    assert "name" in results[0]["match_fields"]
+    assert "session_title" in results[0]["match_fields"]
+
+
+# --- pretty next/search ---
+
+def test_pretty_next_no_projects(capsys):
+    pretty.print_next([])
+    assert "No actionable" in capsys.readouterr().out
+
+
+def test_pretty_next_with_projects(capsys):
+    scored = [{
+        "id": "abcd1234", "name": "my-project", "state": "active",
+        "priority": "high", "score": 0.742,
+        "factors": {"priority": 1.0, "recency": 0.8, "momentum": 0.5, "staleness": 0.0, "actionable": 1.0},
+        "reason": "high priority; has next step",
+    }]
+    pretty.print_next(scored)
+    out = capsys.readouterr().out
+    assert "my-project" in out
+    assert "0.74" in out
+    assert "high priority" in out
+
+
+def test_pretty_search_no_results(capsys):
+    pretty.print_search([], "xyz")
+    assert "No results" in capsys.readouterr().out
+
+
+def test_pretty_search_with_results(capsys):
+    results = [{
+        "name": "api-gateway", "state": "active",
+        "match_fields": ["name", "session_title"],
+    }]
+    pretty.print_search(results, "api")
+    out = capsys.readouterr().out
+    assert "api-gateway" in out
+    assert 'Search: "api"' in out
+
+
+# --- cli next/search ---
+
+def test_cli_next_json(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/next-test", "agents": ["claude"], "session_count": 3, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
+        cli.main(["next"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert len(parsed["data"]) >= 1
+    assert "score" in parsed["data"][0]
+    assert "factors" in parsed["data"][0]
+
+
+def test_cli_next_pretty(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/next-pretty", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
+        cli.main(["next", "--pretty"])
+
+    out = capsys.readouterr().out
+    assert "next-pretty" in out
+
+
+def test_cli_search_json(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/search-test", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+        cli.main(["search", "search-test"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert len(parsed["data"]) == 1
+    assert parsed["data"][0]["name"] == "search-test"
+    assert "name" in parsed["data"][0]["match_fields"]
+
+
+def test_cli_search_pretty(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/search-pretty", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+        cli.main(["search", "--pretty", "search-pretty"])
+
+    out = capsys.readouterr().out
+    assert "search-pretty" in out
+
+
+# --- discover latest_note ---
+
+def test_discover_includes_latest_note():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/noted", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    pid = discover.project_id("/tmp/noted")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(json.dumps({"type": "note", "project_id": pid, "project_path": "/tmp/noted",
+                            "text": "first note"}) + "\n")
+        f.write(json.dumps({"type": "note", "project_id": pid, "project_path": "/tmp/noted",
+                            "text": "latest note"}) + "\n")
+        ann_path = Path(f.name)
+
+    try:
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+            projects, _ = discover.discover()
+        assert projects[0]["latest_note"] == "latest note"
+    finally:
+        os.unlink(ann_path)
+
+
+def test_discover_latest_note_none_when_no_notes():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/no-notes", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+        projects, _ = discover.discover()
+    assert projects[0]["latest_note"] is None

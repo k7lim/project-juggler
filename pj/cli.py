@@ -4,7 +4,8 @@ import argparse
 import sys
 import time
 
-from . import annotate, discover, envelope, pretty
+from . import annotate, discover, envelope, pretty, schedule
+from . import search as search_mod
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
     tag_p.add_argument("project", help="Project path")
     tag_p.add_argument("tag", help="Tag name")
 
+    next_p = sub.add_parser("next", help="What to work on next (scored recommendations)")
+    next_p.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    next_p.add_argument("--pretty", action="store_true", help="Human-readable output")
+
+    srch = sub.add_parser("search", help="Search projects by keyword")
+    srch.add_argument("query", help="Search query")
+    srch.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    srch.add_argument("--pretty", action="store_true", help="Human-readable output")
+
     return parser
 
 
@@ -67,6 +77,33 @@ def _cmd_list(args: argparse.Namespace) -> None:
             offset=args.offset,
             limit=args.limit,
             latency_ms=latency_ms,
+        )
+        print(envelope.to_json(env))
+
+
+def _cmd_next(args: argparse.Namespace) -> None:
+    start = time.monotonic()
+    projects, _ = discover.discover(limit=9999)
+    scored = schedule.score_projects(projects)[: args.limit]
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if args.pretty:
+        pretty.print_next(scored)
+    else:
+        env = envelope.ok(scored, limit=args.limit, latency_ms=latency_ms)
+        print(envelope.to_json(env))
+
+
+def _cmd_search(args: argparse.Namespace) -> None:
+    start = time.monotonic()
+    results = search_mod.search(args.query, limit=args.limit)
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if args.pretty:
+        pretty.print_search(results, args.query)
+    else:
+        env = envelope.ok(
+            results, query=args.query, total=len(results), latency_ms=latency_ms,
         )
         print(envelope.to_json(env))
 
@@ -97,3 +134,7 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_annotate(lambda: annotate.archive(args.project))
     elif args.command == "tag":
         _cmd_annotate(lambda: annotate.tag(args.project, args.tag))
+    elif args.command == "next":
+        _cmd_next(args)
+    elif args.command == "search":
+        _cmd_search(args)
