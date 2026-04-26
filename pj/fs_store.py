@@ -39,6 +39,8 @@ def _configured_roots() -> list[tuple[str, object]]:
     if sources:
         parts = sources.split(":")
         slug_to_parser = {p.agent_slug: p for p in _PARSERS}
+        # Accept short aliases
+        slug_to_parser.setdefault("claude", slug_to_parser.get("claude_code"))  # type: ignore[arg-type]
         for i in range(0, len(parts) - 1, 2):
             agent_name = parts[i].strip()
             path = parts[i + 1].strip()
@@ -65,7 +67,9 @@ def _all_sessions_metadata() -> list[base.NormalizedSession]:
     return sessions
 
 
-def _group_by_workspace(sessions: list[base.NormalizedSession]) -> dict[str, dict]:
+def _group_by_workspace(
+    sessions: list[base.NormalizedSession], detail: bool = False,
+) -> dict[str, dict]:
     """Group sessions into project dicts matching SessionStore.list_projects() shape."""
     grouped: dict[str, dict] = {}
     for s in sessions:
@@ -77,6 +81,10 @@ def _group_by_workspace(sessions: list[base.NormalizedSession]) -> dict[str, dic
                 "session_count": 0,
                 "last_active": None,
             }
+            if detail:
+                grouped[ws].update(
+                    first_active=None, total_duration_secs=0.0, models=set(),
+                )
         g = grouped[ws]
         if s.agent not in g["agents"]:
             g["agents"].append(s.agent)
@@ -85,6 +93,17 @@ def _group_by_workspace(sessions: list[base.NormalizedSession]) -> dict[str, dic
             iso = datetime.fromtimestamp(s.started_at / 1000, tz=timezone.utc).isoformat()
             if g["last_active"] is None or iso > g["last_active"]:
                 g["last_active"] = iso
+            if detail:
+                if g["first_active"] is None or iso < g["first_active"]:
+                    g["first_active"] = iso
+        if detail:
+            if s.started_at and s.ended_at:
+                g["total_duration_secs"] += (s.ended_at - s.started_at) / 1000.0
+            if s.model:
+                g["models"].add(s.model)
+    if detail:
+        for g in grouped.values():
+            g["models"] = sorted(g["models"])
     return grouped
 
 
@@ -94,9 +113,9 @@ def available() -> bool:
     return bool(_configured_roots())
 
 
-def list_projects() -> list[dict]:
+def list_projects(detail: bool = False) -> list[dict]:
     sessions = _all_sessions_metadata()
-    grouped = _group_by_workspace(sessions)
+    grouped = _group_by_workspace(sessions, detail=detail)
     return sorted(grouped.values(), key=lambda p: p["last_active"] or "", reverse=True)
 
 

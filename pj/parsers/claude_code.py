@@ -15,15 +15,42 @@ _DEFAULT_ROOT = os.path.join(Path.home(), ".claude", "projects")
 
 def detect_roots() -> list[str]:
     roots = []
+    seen = set()
+
+    def _add(p: str) -> None:
+        real = os.path.realpath(p)
+        if real not in seen and os.path.isdir(real):
+            seen.add(real)
+            roots.append(real)
+
+    # Explicit env var
     env = os.environ.get(_ENV_KEY)
     if env:
-        p = os.path.join(env, "projects")
-        if os.path.isdir(p):
-            roots.append(p)
-    default = _DEFAULT_ROOT
-    if os.path.isdir(default) and default not in roots:
-        roots.append(default)
+        _add(os.path.join(env, "projects"))
+
+    # Default ~/.claude/projects
+    _add(_DEFAULT_ROOT)
+
+    # Auto-discover ~/.claude-*/projects (e.g. .claude-yolobox)
+    import glob
+    for d in glob.glob(os.path.join(Path.home(), ".claude-*", "projects")):
+        _add(d)
+
     return roots
+
+
+def _project_dir_from_path(path: str) -> str:
+    """Extract project directory name from a session file path.
+
+    The project dir is always the component immediately after "projects/" in the path,
+    regardless of how deep the file is nested (subagents, session UUID dirs, etc.).
+    """
+    parts = Path(path).parts
+    for i, part in enumerate(parts):
+        if part == "projects" and i + 1 < len(parts):
+            return parts[i + 1]
+    # Fallback for paths without "projects" ancestor
+    return os.path.basename(os.path.dirname(path))
 
 
 def _decode_dir_name(dirname: str) -> str:
@@ -43,9 +70,20 @@ def list_sessions(root: str) -> list[str]:
             project_path = os.path.join(root, project_dir)
             if not os.path.isdir(project_path):
                 continue
-            for fname in os.listdir(project_path):
-                if fname.endswith(".jsonl"):
-                    paths.append(os.path.join(project_path, fname))
+            for entry in os.listdir(project_path):
+                entry_path = os.path.join(project_path, entry)
+                if entry.endswith(".jsonl"):
+                    paths.append(entry_path)
+                elif os.path.isdir(entry_path):
+                    # Session UUID subdirs and subagents/ within them
+                    for sub in os.listdir(entry_path):
+                        sub_path = os.path.join(entry_path, sub)
+                        if sub.endswith(".jsonl"):
+                            paths.append(sub_path)
+                        elif sub == "subagents" and os.path.isdir(sub_path):
+                            for sa in os.listdir(sub_path):
+                                if sa.endswith(".jsonl"):
+                                    paths.append(os.path.join(sub_path, sa))
     except OSError:
         pass
     return paths
@@ -96,7 +134,7 @@ def parse_session(path: str) -> NormalizedSession | None:
         return None
 
     # Derive workspace from parent directory name
-    project_dir = os.path.basename(os.path.dirname(path))
+    project_dir = _project_dir_from_path(path)
     workspace = _decode_dir_name(project_dir)
 
     session_id = None
@@ -183,7 +221,7 @@ def parse_metadata(path: str) -> NormalizedSession | None:
     if not lines:
         return None
 
-    project_dir = os.path.basename(os.path.dirname(path))
+    project_dir = _project_dir_from_path(path)
     workspace = _decode_dir_name(project_dir)
     session_id = None
     model = None
