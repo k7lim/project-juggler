@@ -8,18 +8,17 @@ Current state is derived by replaying the log (see discover._read_annotations).
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from . import discover as _discover
-
-ANNOTATIONS_PATH = Path.home() / ".local" / "share" / "pj" / "annotations.jsonl"
+from .paths import annotations_path
 
 VALID_PRIORITIES = ("high", "medium", "low", "none")
 
 
 def _append(event: dict) -> None:
-    ANNOTATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(ANNOTATIONS_PATH, "a") as f:
+    p = annotations_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
         f.write(json.dumps(event, default=str) + "\n")
 
 

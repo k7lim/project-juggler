@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from . import cass_facade
+from .session_store import get_store
 
 PRIORITY_SCORES = {"high": 1.0, "medium": 0.6, "low": 0.2, "none": 0.4}
 
@@ -73,7 +73,7 @@ def score_projects(
     Excludes archived and blocked projects. Returns projects sorted by score descending.
     """
     if recent_counts is None:
-        recent_counts = cass_facade.recent_session_counts(days=7)
+        recent_counts = get_store().recent_session_counts(days=7)
     max_recent = max(recent_counts.values(), default=1) or 1
 
     scored = []

@@ -1,4 +1,4 @@
-"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate, schedule, search, resume."""
+"""Tests for pj: envelope, cass_facade, state, discover, cache, cli, pretty, annotate, schedule, search, resume, session_store."""
 from __future__ import annotations
 
 import json
@@ -21,6 +21,17 @@ import pj.annotate as annotate
 import pj.schedule as schedule
 import pj.resume as resume
 import pj.search as search_mod
+import pj.session_store as session_store
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _use_cass_backend():
+    """Tests mock cass_facade directly, so ensure it's the active store."""
+    old = session_store._store
+    session_store._store = cass_facade
+    yield
+    session_store._store = old
 
 
 # --- envelope ---
@@ -108,7 +119,13 @@ def _create_test_db(path: Path):
         CREATE TABLE conversations (
             id TEXT PRIMARY KEY, agent_id INTEGER, workspace_id INTEGER,
             started_at INTEGER, title TEXT,
-            source_path TEXT, source_id TEXT, origin_host TEXT
+            source_path TEXT, source_id TEXT, origin_host TEXT,
+            primary_model TEXT, ended_at INTEGER,
+            total_input_tokens INTEGER, total_output_tokens INTEGER,
+            total_cache_read_tokens INTEGER, total_cache_creation_tokens INTEGER,
+            grand_total_tokens INTEGER, user_message_count INTEGER,
+            assistant_message_count INTEGER, tool_call_count INTEGER,
+            api_call_count INTEGER
         );
     """)
     conn.execute("INSERT INTO agents VALUES (1, 'claude')")
@@ -117,10 +134,10 @@ def _create_test_db(path: Path):
     conn.execute("INSERT INTO workspaces VALUES (2, '/home/user/project-b')")
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     old_ms = int((datetime.now(timezone.utc) - timedelta(days=20)).timestamp() * 1000)
-    conn.execute("INSERT INTO conversations VALUES ('c1', 1, 1, ?, 't1', '', '', '')", (now_ms,))
-    conn.execute("INSERT INTO conversations VALUES ('c2', 1, 1, ?, 't2', '', '', '')", (now_ms - 3600000,))
-    conn.execute("INSERT INTO conversations VALUES ('c3', 2, 1, ?, 't3', '', '', '')", (now_ms - 7200000,))
-    conn.execute("INSERT INTO conversations VALUES ('c4', 1, 2, ?, 't4', '', '', '')", (old_ms,))
+    conn.execute("INSERT INTO conversations VALUES ('c1', 1, 1, ?, 't1', '', '', '', 'claude-opus-4-6', ?, 100, 5000, 50000, 10000, 65100, 3, 10, 8, 10)", (now_ms, now_ms + 3600000))
+    conn.execute("INSERT INTO conversations VALUES ('c2', 1, 1, ?, 't2', '', '', '', 'claude-opus-4-6', ?, 50, 2000, 20000, 5000, 27050, 2, 5, 3, 5)", (now_ms - 3600000, now_ms - 1800000))
+    conn.execute("INSERT INTO conversations VALUES ('c3', 2, 1, ?, 't3', '', '', '', 'glm-5.1', ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (now_ms - 7200000, now_ms - 3700000))
+    conn.execute("INSERT INTO conversations VALUES ('c4', 1, 2, ?, 't4', '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (old_ms,))
     conn.commit()
     conn.close()
 
@@ -129,7 +146,7 @@ def test_cass_facade_list_projects():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             projects = cass_facade.list_projects()
 
     assert len(projects) == 2
@@ -143,7 +160,7 @@ def test_cass_facade_list_projects():
 
 
 def test_cass_facade_no_db():
-    with mock.patch.object(cass_facade, "db_path", return_value=None):
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
         assert cass_facade.list_projects() == []
 
 
@@ -157,7 +174,7 @@ def test_discover_with_cass():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         projects, total = discover.discover()
 
     assert total == 1
@@ -176,7 +193,7 @@ def test_discover_state_filter():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         projects, total = discover.discover(state_filter="active")
 
     assert total == 1
@@ -192,7 +209,7 @@ def test_discover_pagination():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         projects, total = discover.discover(limit=2, offset=1)
 
     assert total == 5
@@ -225,7 +242,7 @@ def test_discover_annotations():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             projects, total = discover.discover()
 
         assert projects[0]["priority"] == "high"
@@ -238,9 +255,8 @@ def test_discover_annotations():
 
 def test_cache_round_trip():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache_file = Path(tmpdir) / "project_index.json"
-        with mock.patch.object(cache, "CACHE_FILE", cache_file), \
-             mock.patch.object(cache, "CACHE_DIR", Path(tmpdir)), \
+        with mock.patch("pj.cache.cache_file", return_value=Path(tmpdir) / "project_index.json"), \
+             mock.patch("pj.cache.cache_dir", return_value=Path(tmpdir)), \
              mock.patch.object(cache, "_signatures", return_value={"test": 1.0}):
             assert cache.load() is None
             cache.save([{"id": "abc"}])
@@ -250,15 +266,15 @@ def test_cache_round_trip():
 
 def test_cache_invalidation():
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache_file = Path(tmpdir) / "project_index.json"
+        cf = Path(tmpdir) / "project_index.json"
         sig = {"v": 1.0}
-        with mock.patch.object(cache, "CACHE_FILE", cache_file), \
-             mock.patch.object(cache, "CACHE_DIR", Path(tmpdir)), \
+        with mock.patch("pj.cache.cache_file", return_value=cf), \
+             mock.patch("pj.cache.cache_dir", return_value=Path(tmpdir)), \
              mock.patch.object(cache, "_signatures", return_value=sig):
             cache.save([{"id": "abc"}])
 
         sig2 = {"v": 2.0}
-        with mock.patch.object(cache, "CACHE_FILE", cache_file), \
+        with mock.patch("pj.cache.cache_file", return_value=cf), \
              mock.patch.object(cache, "_signatures", return_value=sig2):
             assert cache.load() is None
 
@@ -293,7 +309,7 @@ def test_cli_list_json(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         cli.main(["list"])
 
     out = capsys.readouterr().out
@@ -309,7 +325,7 @@ def test_cli_list_pretty(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         cli.main(["list", "--pretty"])
 
     out = capsys.readouterr().out
@@ -326,7 +342,7 @@ def test_cli_list_state_filter(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         cli.main(["list", "--state", "dormant"])
 
     out = capsys.readouterr().out
@@ -355,7 +371,7 @@ def test_project_id_deterministic():
 def test_annotate_note():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             event = annotate.note("/tmp/my-proj", "fix the build")
 
         assert event["type"] == "note"
@@ -372,7 +388,7 @@ def test_annotate_note():
 def test_annotate_prioritize():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             event = annotate.prioritize("/tmp/proj", "high")
 
     assert event["type"] == "priority"
@@ -382,7 +398,7 @@ def test_annotate_prioritize():
 def test_annotate_prioritize_invalid():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             try:
                 annotate.prioritize("/tmp/proj", "urgent")
                 assert False, "Should have raised ValueError"
@@ -395,7 +411,7 @@ def test_annotate_prioritize_invalid():
 def test_annotate_archive():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             event = annotate.archive("/tmp/proj")
 
     assert event["type"] == "archive"
@@ -405,7 +421,7 @@ def test_annotate_archive():
 def test_annotate_tag():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             event = annotate.tag("/tmp/proj", "infra")
 
     assert event["type"] == "tag"
@@ -415,7 +431,7 @@ def test_annotate_tag():
 def test_annotate_append_only():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             annotate.note("/tmp/proj", "first")
             annotate.note("/tmp/proj", "second")
             annotate.prioritize("/tmp/proj", "medium")
@@ -430,7 +446,7 @@ def test_annotate_append_only():
 def test_annotate_creates_parent_dirs():
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "nested" / "dir" / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             annotate.note("/tmp/proj", "test")
 
         assert ann_path.exists()
@@ -444,7 +460,7 @@ def test_discover_replays_annotations_integration():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             annotate.prioritize("/tmp/tagged-proj", "high")
             annotate.tag("/tmp/tagged-proj", "ml")
             annotate.tag("/tmp/tagged-proj", "infra")
@@ -453,7 +469,7 @@ def test_discover_replays_annotations_integration():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             projects, total = discover.discover()
 
         assert total == 1
@@ -468,13 +484,13 @@ def test_discover_archive_state():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             annotate.archive("/tmp/arch-proj")
 
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             projects, total = discover.discover(state_filter="archived")
 
         assert total == 1
@@ -486,7 +502,7 @@ def test_discover_archive_state():
 def test_cli_note(capsys):
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             cli.main(["note", "/tmp/proj", "remember to refactor"])
 
     out = capsys.readouterr().out
@@ -499,7 +515,7 @@ def test_cli_note(capsys):
 def test_cli_prioritize(capsys):
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             cli.main(["prioritize", "/tmp/proj", "high"])
 
     out = capsys.readouterr().out
@@ -512,7 +528,7 @@ def test_cli_prioritize(capsys):
 def test_cli_archive(capsys):
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             cli.main(["archive", "/tmp/proj"])
 
     out = capsys.readouterr().out
@@ -524,7 +540,7 @@ def test_cli_archive(capsys):
 def test_cli_tag(capsys):
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             cli.main(["tag", "/tmp/proj", "backend"])
 
     out = capsys.readouterr().out
@@ -640,7 +656,7 @@ def test_schedule_reason_string():
 def test_schedule_no_cass_fallback():
     now_iso = datetime.now(timezone.utc).isoformat()
     projects = [_make_project("/tmp/proj", last_active=now_iso)]
-    with mock.patch.object(cass_facade, "db_path", return_value=None):
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
         scored = schedule.score_projects(projects)
     assert len(scored) == 1
     assert scored[0]["factors"]["momentum"] == 0.0
@@ -672,14 +688,14 @@ def test_cass_facade_recent_session_counts():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             counts = cass_facade.recent_session_counts(days=7)
     assert "/home/user/project-a" in counts
     assert counts["/home/user/project-a"] >= 1
 
 
 def test_cass_facade_recent_session_counts_no_db():
-    with mock.patch.object(cass_facade, "db_path", return_value=None):
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
         assert cass_facade.recent_session_counts() == {}
 
 
@@ -687,7 +703,7 @@ def test_cass_facade_search_sessions():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             results = cass_facade.search_sessions("t1")
     assert len(results) >= 1
     assert results[0]["title"] == "t1"
@@ -698,13 +714,13 @@ def test_cass_facade_search_sessions_no_match():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             results = cass_facade.search_sessions("nonexistent_query_xyz")
     assert results == []
 
 
 def test_cass_facade_search_sessions_no_db():
-    with mock.patch.object(cass_facade, "db_path", return_value=None):
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
         assert cass_facade.search_sessions("test") == []
 
 
@@ -716,8 +732,9 @@ def test_search_by_name():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         results = search_mod.search("api")
     assert len(results) == 1
     assert "name" in results[0]["match_fields"]
@@ -737,8 +754,9 @@ def test_search_by_note():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path), \
-             mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path), \
+             mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
             results = search_mod.search("authentication")
         assert len(results) == 1
         assert "note" in results[0]["match_fields"]
@@ -754,8 +772,9 @@ def test_search_by_session_title():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         results = search_mod.search("memory leak")
     assert len(results) == 1
     assert "session_title" in results[0]["match_fields"]
@@ -768,8 +787,9 @@ def test_search_no_results():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         results = search_mod.search("zzz_no_match_zzz")
     assert results == []
 
@@ -788,8 +808,9 @@ def test_search_by_tag():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path), \
-             mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path), \
+             mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
             results = search_mod.search("infra")
         assert len(results) == 1
         assert "tag" in results[0]["match_fields"]
@@ -805,8 +826,9 @@ def test_search_deduplicates():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=session_hits), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         results = search_mod.search("api")
     assert len(results) == 1
     assert "name" in results[0]["match_fields"]
@@ -858,7 +880,7 @@ def test_cli_next_json(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
         cli.main(["next"])
 
@@ -876,7 +898,7 @@ def test_cli_next_pretty(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
         cli.main(["next", "--pretty"])
 
@@ -890,8 +912,9 @@ def test_cli_search_json(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         cli.main(["search", "search-test"])
 
     out = capsys.readouterr().out
@@ -908,8 +931,9 @@ def test_cli_search_pretty(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
-         mock.patch.object(cass_facade, "search_sessions", return_value=[]):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
         cli.main(["search", "--pretty", "search-pretty"])
 
     out = capsys.readouterr().out
@@ -934,7 +958,7 @@ def test_discover_includes_latest_note():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             projects, _ = discover.discover()
         assert projects[0]["latest_note"] == "latest note"
     finally:
@@ -947,7 +971,7 @@ def test_discover_latest_note_none_when_no_notes():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         projects, _ = discover.discover()
     assert projects[0]["latest_note"] is None
 
@@ -993,7 +1017,7 @@ def test_cass_facade_project_sessions():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             sessions = cass_facade.project_sessions("/home/user/project-a")
     assert len(sessions) == 3
     assert sessions[0]["agent"] in ("claude", "codex")
@@ -1004,13 +1028,13 @@ def test_cass_facade_project_sessions_no_match():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "agent_search.db"
         _create_test_db(db)
-        with mock.patch.object(cass_facade, "db_path", return_value=db):
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             sessions = cass_facade.project_sessions("/nonexistent/path")
     assert sessions == []
 
 
 def test_cass_facade_project_sessions_no_db():
-    with mock.patch.object(cass_facade, "db_path", return_value=None):
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
         assert cass_facade.project_sessions("/any/path") == []
 
 
@@ -1022,7 +1046,7 @@ def _mock_discover_with(fake_projects):
         mock.patch.object(cass_facade, "list_projects", return_value=fake_projects),
         mock.patch.object(cache, "load", return_value=None),
         mock.patch.object(cache, "save"),
-        mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")),
+        mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")),
     )
 
 
@@ -1106,7 +1130,7 @@ def test_cli_status_json(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
         cli.main(["status", "status-test"])
 
@@ -1128,7 +1152,7 @@ def test_cli_status_pretty(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
         cli.main(["status", "--pretty", "status-pretty"])
 
@@ -1142,7 +1166,7 @@ def test_cli_status_not_found(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=[]), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         try:
             cli.main(["status", "nonexistent"])
         except SystemExit:
@@ -1162,7 +1186,7 @@ def test_cli_resume(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions):
         cli.main(["resume", "resume-test"])
 
@@ -1174,7 +1198,7 @@ def test_cli_resume_not_found(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=[]), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         try:
             cli.main(["resume", "nonexistent"])
         except SystemExit:
@@ -1191,7 +1215,7 @@ def test_cli_resume_no_sessions(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "project_sessions", return_value=[]):
         try:
             cli.main(["resume", "no-sess"])
@@ -1279,7 +1303,7 @@ def test_discover_tag_filter():
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             projects, total = discover.discover(tag_filter="ml")
 
         assert total == 1
@@ -1295,7 +1319,7 @@ def test_discover_tag_filter_no_match():
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         projects, total = discover.discover(tag_filter="nonexistent")
     assert total == 0
     assert projects == []
@@ -1317,7 +1341,7 @@ def test_cli_list_tag_filter(capsys):
         with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
              mock.patch.object(cache, "load", return_value=None), \
              mock.patch.object(cache, "save"), \
-             mock.patch.object(discover, "ANNOTATIONS_PATH", ann_path):
+             mock.patch("pj.discover.annotations_path", return_value=ann_path):
             cli.main(["list", "--tag", "ml"])
 
         out = capsys.readouterr().out
@@ -1337,7 +1361,7 @@ def test_cli_list_has_latency(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")):
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
         cli.main(["list"])
     parsed = json.loads(capsys.readouterr().out)
     assert "latency_ms" in parsed["meta"]
@@ -1350,7 +1374,7 @@ def test_cli_next_has_latency(capsys):
     with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
          mock.patch.object(cache, "load", return_value=None), \
          mock.patch.object(cache, "save"), \
-         mock.patch.object(discover, "ANNOTATIONS_PATH", Path("/nonexistent")), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
          mock.patch.object(cass_facade, "recent_session_counts", return_value={}):
         cli.main(["next"])
     parsed = json.loads(capsys.readouterr().out)
@@ -1360,7 +1384,7 @@ def test_cli_next_has_latency(capsys):
 def test_cli_annotate_has_latency(capsys):
     with tempfile.TemporaryDirectory() as tmpdir:
         ann_path = Path(tmpdir) / "annotations.jsonl"
-        with mock.patch.object(annotate, "ANNOTATIONS_PATH", ann_path):
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path):
             cli.main(["note", "/tmp/proj", "test"])
     parsed = json.loads(capsys.readouterr().out)
     assert "latency_ms" in parsed["meta"]
@@ -1412,3 +1436,718 @@ def test_pretty_color_score():
         assert "\033[32m" in pretty._color_score(0.75)
         assert "\033[33m" in pretty._color_score(0.50)
         assert "\033[31m" in pretty._color_score(0.20)
+
+
+# --- Bug fix: session_id as integer from SQLite ---
+# CASS stores session IDs as INTEGER PRIMARY KEY, so they come back as int.
+# resume.py and pretty.py must handle int, str, and UUID-style IDs.
+
+
+def test_resume_command_int_session_id():
+    """Bug: shlex.quote() crashed on int session_id from SQLite."""
+    cmd = resume.resume_command("claude", 42)
+    assert cmd == "claude --resume 42"
+
+
+def test_resume_command_large_int_session_id():
+    cmd = resume.resume_command("codex", 999999)
+    assert "--resume 999999" in cmd
+
+
+def test_full_resume_command_int_session_id():
+    cmd = resume.full_resume_command("/home/user/proj", "claude", 1)
+    assert "cd /home/user/proj" in cmd
+    assert "--resume 1" in cmd
+
+
+def test_resume_command_uuid_session_id():
+    """Normal case: string UUID session ID."""
+    uid = "abc12345-dead-beef-cafe-0123456789ab"
+    cmd = resume.resume_command("claude", uid)
+    assert uid in cmd
+
+
+def test_resume_command_none_session_id():
+    """Edge case: None session_id should not crash."""
+    cmd = resume.resume_command("claude", None)
+    assert "--resume" in cmd
+
+
+def test_pretty_status_int_session_id(capsys):
+    """Bug: str[:12] crashed on int session_id in pretty.print_status."""
+    data = {
+        "name": "proj",
+        "path": "/tmp/proj",
+        "id": "abcd1234",
+        "state": "active",
+        "priority": "none",
+        "agents": ["claude"],
+        "session_count": 1,
+        "last_active": datetime.now(timezone.utc).isoformat(),
+        "tags": [],
+        "latest_note": None,
+        "sessions": [
+            {"session_id": 42, "agent": "claude", "title": "session", "started_at": datetime.now(timezone.utc).isoformat()},
+        ],
+        "resume_cmd": "cd /tmp/proj && claude --resume 42",
+    }
+    pretty.print_status(data)
+    out = capsys.readouterr().out
+    assert "42" in out
+    assert "proj" in out
+
+
+def test_pretty_status_mixed_session_ids(capsys):
+    """Both int and string session IDs in the same status view."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    data = {
+        "name": "mixed",
+        "path": "/tmp/mixed",
+        "id": "deadbeef",
+        "state": "active",
+        "priority": "none",
+        "agents": ["claude", "codex"],
+        "session_count": 2,
+        "last_active": now_iso,
+        "tags": [],
+        "latest_note": None,
+        "sessions": [
+            {"session_id": 7, "agent": "claude", "title": "int id", "started_at": now_iso},
+            {"session_id": "abc-def-123", "agent": "codex", "title": "str id", "started_at": now_iso},
+        ],
+        "resume_cmd": "cd /tmp/mixed && claude --resume 7",
+    }
+    pretty.print_status(data)
+    out = capsys.readouterr().out
+    assert "7" in out
+    assert "abc-def-123" in out
+
+
+# --- Multi-DB: PJ_CASS_DBS support ---
+
+
+def _create_test_db_with_data(path: Path, workspaces: list[tuple], conversations: list[tuple]):
+    """Create a CASS SQLite DB with specified workspaces and conversations."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT);
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE conversations (
+            id TEXT PRIMARY KEY, agent_id INTEGER, workspace_id INTEGER,
+            started_at INTEGER, title TEXT,
+            source_path TEXT, source_id TEXT, origin_host TEXT,
+            primary_model TEXT, ended_at INTEGER,
+            total_input_tokens INTEGER, total_output_tokens INTEGER,
+            total_cache_read_tokens INTEGER, total_cache_creation_tokens INTEGER,
+            grand_total_tokens INTEGER, user_message_count INTEGER,
+            assistant_message_count INTEGER, tool_call_count INTEGER,
+            api_call_count INTEGER
+        );
+    """)
+    conn.execute("INSERT INTO agents VALUES (1, 'claude_code')")
+    conn.execute("INSERT INTO agents VALUES (2, 'codex')")
+    for ws in workspaces:
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", ws)
+    for conv in conversations:
+        conn.execute(
+            "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+            conv,
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_multi_db_list_projects():
+    """Two CASS databases should merge their projects."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "host.db"
+        db2 = Path(tmpdir) / "yolobox.db"
+
+        _create_test_db_with_data(db1,
+            workspaces=[(1, "/home/user/proj-host")],
+            conversations=[("c1", 1, 1, now_ms, "host session")],
+        )
+        _create_test_db_with_data(db2,
+            workspaces=[(1, "/home/user/proj-yolobox")],
+            conversations=[("c2", 1, 1, now_ms - 1000, "yolobox session")],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            projects = cass_facade.list_projects()
+
+    paths = {p["path"] for p in projects}
+    assert "/home/user/proj-host" in paths
+    assert "/home/user/proj-yolobox" in paths
+    assert len(projects) == 2
+
+
+def test_multi_db_same_workspace_merges():
+    """Same workspace in two DBs should merge session counts and agents."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "host.db"
+        db2 = Path(tmpdir) / "yolobox.db"
+
+        _create_test_db_with_data(db1,
+            workspaces=[(1, "/home/user/shared-proj")],
+            conversations=[("c1", 1, 1, now_ms, "from host")],
+        )
+        _create_test_db_with_data(db2,
+            workspaces=[(1, "/home/user/shared-proj")],
+            conversations=[
+                ("c2", 2, 1, now_ms - 1000, "from yolobox"),
+                ("c3", 2, 1, now_ms - 2000, "from yolobox 2"),
+            ],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            projects = cass_facade.list_projects()
+
+    assert len(projects) == 1
+    p = projects[0]
+    assert p["session_count"] == 3
+    assert sorted(p["agents"]) == ["claude_code", "codex"]
+
+
+def test_multi_db_recent_session_counts_merge():
+    """Recent session counts should sum across DBs for same workspace."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "a.db"
+        db2 = Path(tmpdir) / "b.db"
+
+        _create_test_db_with_data(db1,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms, "s1")],
+        )
+        _create_test_db_with_data(db2,
+            workspaces=[(1, "/proj")],
+            conversations=[("c2", 1, 1, now_ms, "s2"), ("c3", 1, 1, now_ms, "s3")],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            counts = cass_facade.recent_session_counts(days=7)
+
+    assert counts["/proj"] == 3
+
+
+def test_multi_db_project_sessions_sorted():
+    """Sessions from multiple DBs should be sorted by time, most recent first."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "a.db"
+        db2 = Path(tmpdir) / "b.db"
+
+        _create_test_db_with_data(db1,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms - 2000, "older")],
+        )
+        _create_test_db_with_data(db2,
+            workspaces=[(1, "/proj")],
+            conversations=[("c2", 1, 1, now_ms, "newer")],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            sessions = cass_facade.project_sessions("/proj")
+
+    assert len(sessions) == 2
+    assert sessions[0]["title"] == "newer"
+    assert sessions[1]["title"] == "older"
+
+
+def test_multi_db_search_sessions():
+    """Search should find results across both DBs."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "a.db"
+        db2 = Path(tmpdir) / "b.db"
+
+        _create_test_db_with_data(db1,
+            workspaces=[(1, "/proj-a")],
+            conversations=[("c1", 1, 1, now_ms, "fixing auth bug")],
+        )
+        _create_test_db_with_data(db2,
+            workspaces=[(1, "/proj-b")],
+            conversations=[("c2", 1, 1, now_ms, "fixing auth middleware")],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            results = cass_facade.search_sessions("auth")
+
+    assert len(results) == 2
+    paths = {r["path"] for r in results}
+    assert "/proj-a" in paths
+    assert "/proj-b" in paths
+
+
+def test_multi_db_empty_list():
+    """No DBs should return empty results, not crash."""
+    with mock.patch.object(cass_facade, "db_paths", return_value=[]):
+        assert cass_facade.list_projects() == []
+        assert cass_facade.recent_session_counts() == {}
+        assert cass_facade.project_sessions("/any") == []
+        assert cass_facade.search_sessions("any") == []
+
+
+def test_multi_db_one_corrupt():
+    """A corrupt DB should be skipped, not crash the whole query."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        good_db = Path(tmpdir) / "good.db"
+        bad_db = Path(tmpdir) / "bad.db"
+
+        _create_test_db_with_data(good_db,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms, "works")],
+        )
+        bad_db.write_text("not a sqlite database")
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[bad_db, good_db]):
+            projects = cass_facade.list_projects()
+
+    assert len(projects) == 1
+    assert projects[0]["path"] == "/proj"
+
+
+def test_multi_db_nonexistent_skipped():
+    """A DB path that doesn't exist should be filtered out by db_paths()."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        missing = Path(tmpdir) / "does_not_exist.db"
+        assert not missing.exists()
+        # db_paths filters by existence, so this shouldn't appear
+        with mock.patch.dict(os.environ, {"PJ_CASS_DBS": str(missing)}):
+            paths = cass_facade.db_paths()
+        assert missing not in paths
+
+
+def test_db_paths_deduplicates():
+    """Same DB path listed twice should only appear once."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "agent_search.db"
+        _create_test_db_with_data(db, workspaces=[], conversations=[])
+
+        with mock.patch.dict(os.environ, {"PJ_CASS_DBS": f"{db}:{db}"}):
+            # Clear other env vars that might add paths
+            with mock.patch.dict(os.environ, {"CASS_DATA_DIR": ""}, clear=False):
+                paths = cass_facade.db_paths()
+
+    assert len([p for p in paths if p.resolve() == db.resolve()]) == 1
+
+
+# --- PJ_DATA_DIR isolation ---
+
+def test_pj_data_dir_isolates_annotations():
+    """PJ_DATA_DIR env var should redirect annotations to a temp directory."""
+    import pj.paths as pj_paths
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with mock.patch.dict(os.environ, {"PJ_DATA_DIR": tmpdir}):
+            p = pj_paths.annotations_path()
+            assert str(p).startswith(tmpdir)
+            assert p.name == "annotations.jsonl"
+
+
+def test_pj_data_dir_isolates_cache():
+    """PJ_DATA_DIR env var should redirect cache to a subdirectory."""
+    import pj.paths as pj_paths
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with mock.patch.dict(os.environ, {"PJ_DATA_DIR": tmpdir}):
+            cd = pj_paths.cache_dir()
+            cf = pj_paths.cache_file()
+            assert str(cd).startswith(tmpdir)
+            assert str(cf).startswith(tmpdir)
+
+
+# --- Content search (search_content + search integration) ---
+
+
+def _create_test_db_with_messages(path: Path, workspaces, conversations, messages):
+    """Create a CASS DB with messages for content search tests."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT);
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE conversations (
+            id TEXT PRIMARY KEY, agent_id INTEGER, workspace_id INTEGER,
+            started_at INTEGER, title TEXT,
+            source_path TEXT, source_id TEXT, origin_host TEXT,
+            primary_model TEXT, ended_at INTEGER,
+            total_input_tokens INTEGER, total_output_tokens INTEGER,
+            total_cache_read_tokens INTEGER, total_cache_creation_tokens INTEGER,
+            grand_total_tokens INTEGER, user_message_count INTEGER,
+            assistant_message_count INTEGER, tool_call_count INTEGER,
+            api_call_count INTEGER
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY, conversation_id INTEGER, idx INTEGER,
+            role TEXT, author TEXT, created_at INTEGER, content TEXT,
+            extra_json TEXT, extra_bin BLOB
+        );
+    """)
+    conn.execute("INSERT INTO agents VALUES (1, 'claude_code')")
+    for ws in workspaces:
+        conn.execute("INSERT INTO workspaces VALUES (?, ?)", ws)
+    for conv in conversations:
+        conn.execute(
+            "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", conv,
+        )
+    for msg in messages:
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, '', '')", msg,
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_search_content_like_fallback():
+    """search_content falls back to LIKE when FTS5 is unavailable."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        _create_test_db_with_messages(db,
+            workspaces=[(1, "/proj/health-tracker")],
+            conversations=[("c1", 1, 1, now_ms, "health session")],
+            messages=[
+                (1, "c1", 0, "user", None, now_ms, "research personal health metrics"),
+                (2, "c1", 1, "assistant", None, now_ms, "I'll help with health data analysis"),
+            ],
+        )
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
+            results = cass_facade.search_content("health")
+
+    assert len(results) >= 1
+    assert results[0]["path"] == "/proj/health-tracker"
+    assert "health" in results[0]["snippet"].lower()
+    assert results[0]["match_type"] == "like"
+
+
+def test_search_content_across_multi_db():
+    """Content search merges results from multiple databases."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db1 = Path(tmpdir) / "host.db"
+        db2 = Path(tmpdir) / "yolobox.db"
+
+        _create_test_db_with_messages(db1,
+            workspaces=[(1, "/proj/host-research")],
+            conversations=[("c1", 1, 1, now_ms, "host session")],
+            messages=[(1, "c1", 0, "user", None, now_ms, "analyzing nutrition data")],
+        )
+        _create_test_db_with_messages(db2,
+            workspaces=[(1, "/proj/yolo-research")],
+            conversations=[("c1", 1, 1, now_ms - 1000, "yolo session")],
+            messages=[(1, "c1", 0, "user", None, now_ms, "tracking nutrition intake")],
+        )
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db1, db2]):
+            results = cass_facade.search_content("nutrition")
+
+    paths = {r["path"] for r in results}
+    assert "/proj/host-research" in paths
+    assert "/proj/yolo-research" in paths
+
+
+def test_search_content_dedupes_by_session():
+    """Multiple message hits in the same session should return one result."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        _create_test_db_with_messages(db,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms, "session")],
+            messages=[
+                (1, "c1", 0, "user", None, now_ms, "first mention of vitamins"),
+                (2, "c1", 1, "assistant", None, now_ms, "vitamins are important"),
+                (3, "c1", 2, "user", None, now_ms, "more about vitamins please"),
+            ],
+        )
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
+            results = cass_facade.search_content("vitamins")
+
+    assert len(results) == 1  # one session, not three messages
+
+
+def test_search_content_no_results():
+    """Search for nonexistent term returns empty."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Path(tmpdir) / "test.db"
+        _create_test_db_with_messages(db,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms, "session")],
+            messages=[(1, "c1", 0, "user", None, now_ms, "hello world")],
+        )
+        with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
+            results = cass_facade.search_content("xyznonexistent")
+
+    assert results == []
+
+
+def test_search_content_corrupt_db_skipped():
+    """A corrupt DB shouldn't crash content search."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        good = Path(tmpdir) / "good.db"
+        bad = Path(tmpdir) / "bad.db"
+
+        _create_test_db_with_messages(good,
+            workspaces=[(1, "/proj")],
+            conversations=[("c1", 1, 1, now_ms, "session")],
+            messages=[(1, "c1", 0, "user", None, now_ms, "health research data")],
+        )
+        bad.write_text("not a database")
+
+        with mock.patch.object(cass_facade, "db_paths", return_value=[bad, good]):
+            results = cass_facade.search_content("health")
+
+    assert len(results) == 1
+
+
+def test_extract_snippet_centered():
+    """Snippet should be centered around the match."""
+    content = "x" * 200 + "KEYWORD" + "y" * 200
+    snippet = cass_facade._extract_snippet(content, "KEYWORD", context_chars=20)
+    assert "KEYWORD" in snippet
+    assert snippet.startswith("...")
+    assert snippet.endswith("...")
+    assert len(snippet) < 60  # 20 + 7 + 20 + 6 (ellipses)
+
+
+def test_extract_snippet_at_start():
+    """Match at the start shouldn't have leading ellipsis."""
+    snippet = cass_facade._extract_snippet("KEYWORD is here", "KEYWORD", context_chars=50)
+    assert not snippet.startswith("...")
+    assert "KEYWORD" in snippet
+
+
+def test_extract_snippet_no_match():
+    """If query not found (e.g. FTS stemmed match), return content start."""
+    snippet = cass_facade._extract_snippet("some long content here", "missing", context_chars=10)
+    assert snippet.startswith("some")
+
+
+def test_search_integration_content_match():
+    """pj search should include content matches with snippets."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake_projects = [{"path": "/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    content_hits = [{
+        "path": "/proj",
+        "session_id": 1,
+        "agent": "claude",
+        "title": "session",
+        "snippet": "...discussing personal health research...",
+        "role": "user",
+        "started_at": now_iso,
+        "match_type": "like",
+    }]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=content_hits):
+        results = search_mod.search("health")
+
+    assert len(results) == 1
+    assert "content" in results[0]["match_fields"]
+    assert "snippets" in results[0]
+    assert "health research" in results[0]["snippets"][0]
+
+
+def test_search_integration_merges_content_with_name():
+    """Content match on a project already matched by name should merge."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake_projects = [{"path": "/proj/health-app", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    content_hits = [{
+        "path": "/proj/health-app",
+        "session_id": 1,
+        "agent": "claude",
+        "title": "session",
+        "snippet": "...health metrics dashboard...",
+        "role": "assistant",
+        "started_at": now_iso,
+        "match_type": "like",
+    }]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=content_hits):
+        results = search_mod.search("health")
+
+    assert len(results) == 1
+    assert "name" in results[0]["match_fields"]
+    assert "content" in results[0]["match_fields"]
+    assert "snippets" in results[0]
+
+
+# --- session_store: contract tests ---
+
+class FakeStore:
+    """Minimal SessionStore implementation for contract testing."""
+
+    def __init__(self, projects=None, sessions=None, content=None):
+        self._projects = projects or []
+        self._sessions = sessions or []
+        self._content = content or []
+
+    def available(self) -> bool:
+        return True
+
+    def list_projects(self) -> list[dict]:
+        return self._projects
+
+    def recent_session_counts(self, days: int = 7) -> dict[str, int]:
+        return {}
+
+    def project_sessions(self, workspace_path: str, limit: int = 50) -> list[dict]:
+        return [s for s in self._sessions if s.get("_path") == workspace_path][:limit]
+
+    def session_details(self, session_ids: list) -> dict:
+        return {}
+
+    def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+        return []
+
+    def search_content(self, query: str, limit: int = 20) -> list[dict]:
+        return [h for h in self._content if query.lower() in h.get("snippet", "").lower()][:limit]
+
+
+def test_store_swap_discover_uses_new_backend():
+    """Swapping the store makes discover() use the new backend."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = FakeStore(projects=[
+        {"path": "/fake/project", "agents": ["test_agent"], "session_count": 5, "last_active": now_iso},
+    ])
+    old_store = session_store._store
+    try:
+        session_store.set_store(fake)
+        with mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            projects, total = discover.discover(limit=20)
+        assert total == 1
+        assert projects[0]["path"] == "/fake/project"
+        assert projects[0]["agents"] == ["test_agent"]
+    finally:
+        session_store._store = old_store
+
+
+def test_store_swap_search_uses_new_backend():
+    """Swapping the store makes search() use the new backend for content."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = FakeStore(
+        projects=[{"path": "/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}],
+        content=[{
+            "path": "/proj", "session_id": "abc", "agent": "claude",
+            "snippet": "found the hackathon discussion", "title": "test",
+            "started_at": now_iso, "match_type": "fake",
+        }],
+    )
+    old_store = session_store._store
+    try:
+        session_store.set_store(fake)
+        with mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            results = search_mod.search("hackathon")
+        assert len(results) == 1
+        assert "content" in results[0]["match_fields"]
+        assert "hackathon" in results[0]["snippets"][0]
+    finally:
+        session_store._store = old_store
+
+
+def test_store_swap_schedule_uses_new_backend():
+    """Swapping the store makes schedule use the new backend for momentum."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = FakeStore(projects=[
+        {"path": "/proj", "agents": ["claude"], "session_count": 3, "last_active": now_iso},
+    ])
+    old_store = session_store._store
+    try:
+        session_store.set_store(fake)
+        with mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            projects, _ = discover.discover(limit=20)
+            scored = schedule.score_projects(projects)
+        assert len(scored) == 1
+        assert "score" in scored[0]
+        assert scored[0]["score"] > 0
+    finally:
+        session_store._store = old_store
+
+
+def test_store_default_is_fs():
+    """Default store is fs_store (PJ_BACKEND unset)."""
+    import pj.fs_store as fs_store_mod
+    old_store = session_store._store
+    try:
+        session_store._store = None  # reset
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PJ_BACKEND", None)
+            store = session_store.get_store()
+        assert store is fs_store_mod
+    finally:
+        session_store._store = old_store
+
+
+def test_store_cass_via_env():
+    """PJ_BACKEND=cass selects cass_facade."""
+    old_store = session_store._store
+    try:
+        session_store._store = None
+        with mock.patch.dict(os.environ, {"PJ_BACKEND": "cass"}):
+            store = session_store.get_store()
+        assert store is cass_facade
+    finally:
+        session_store._store = old_store
+
+
+def test_store_contract_list_projects_shape():
+    """Any store's list_projects must return the expected dict shape."""
+    fake = FakeStore(projects=[
+        {"path": "/p", "agents": ["a"], "session_count": 1, "last_active": None},
+    ])
+    projects = fake.list_projects()
+    assert len(projects) == 1
+    p = projects[0]
+    assert "path" in p and isinstance(p["path"], str)
+    assert "agents" in p and isinstance(p["agents"], list)
+    assert "session_count" in p and isinstance(p["session_count"], int)
+    assert "last_active" in p  # can be None or str
+
+
+def test_store_contract_empty_returns():
+    """A store with no data returns empty collections, never raises."""
+    fake = FakeStore()
+    assert fake.list_projects() == []
+    assert fake.recent_session_counts() == {}
+    assert fake.project_sessions("/any") == []
+    assert fake.session_details([]) == {}
+    assert fake.search_sessions("any") == []
+    assert fake.search_content("any") == []
+
+
+def test_store_contract_cass_facade_satisfies_protocol():
+    """cass_facade module has all SessionStore methods."""
+    required = ["available", "list_projects", "recent_session_counts",
+                "project_sessions", "session_details", "search_sessions",
+                "search_content"]
+    for method in required:
+        assert hasattr(cass_facade, method), f"cass_facade missing {method}"
+        assert callable(getattr(cass_facade, method)), f"cass_facade.{method} not callable"
+
+
+def test_no_cass_imports_in_consumers():
+    """No pj consumer module should import cass_facade directly."""
+    import importlib
+    consumer_modules = ["pj.discover", "pj.cli", "pj.search", "pj.schedule", "pj.cache"]
+    for mod_name in consumer_modules:
+        mod = importlib.import_module(mod_name)
+        source = open(mod.__file__).read()
+        assert "import cass_facade" not in source, f"{mod_name} still imports cass_facade directly"
+        assert "from . import cass_facade" not in source and \
+               "from .cass_facade" not in source, f"{mod_name} still imports from cass_facade"

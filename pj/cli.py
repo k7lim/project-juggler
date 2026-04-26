@@ -4,8 +4,9 @@ import argparse
 import sys
 import time
 
-from . import annotate, cass_facade, discover, envelope, pretty, resume, schedule
+from . import annotate, discover, envelope, pretty, resume, schedule
 from . import search as search_mod
+from .session_store import get_store
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,13 +113,20 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
         sys.exit(1)
 
-    sessions = cass_facade.project_sessions(project["path"], limit=args.sessions)
+    sessions = get_store().project_sessions(project["path"], limit=args.sessions)
     resume_cmd = None
     if sessions:
         latest = sessions[0]
         resume_cmd = resume.full_resume_command(
             project["path"], latest["agent"], latest["session_id"],
         )
+        # Enrich sessions with harness version and per-message models
+        sids = [s["session_id"] for s in sessions]
+        details = get_store().session_details(sids)
+        for s in sessions:
+            d = details.get(s["session_id"], {})
+            s["versions"] = d.get("versions", [])
+            s["models"] = d.get("models", [])
 
     status_data = {
         **project,
@@ -141,7 +149,7 @@ def _cmd_resume(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
         sys.exit(1)
 
-    sessions = cass_facade.project_sessions(project["path"], limit=1)
+    sessions = get_store().project_sessions(project["path"], limit=1)
     if not sessions:
         env = envelope.err(f"No sessions found for {project['name']}")
         print(envelope.to_json(env))

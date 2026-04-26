@@ -6,6 +6,7 @@ import shlex
 
 AGENT_RESUME_TEMPLATES: dict[str, str] = {
     "claude": "claude --resume {session_id}",
+    "claude_code": "claude --resume {session_id}",
     "codex": "codex --resume {session_id}",
     "opencode": "opencode --resume {session_id}",
     "amp": "amp --resume {session_id}",
@@ -25,7 +26,7 @@ DEFAULT_TEMPLATE = "{agent} --resume {session_id}"
 def resume_command(agent: str, session_id: str) -> str:
     """Build the resume CLI string for a given agent and session."""
     template = AGENT_RESUME_TEMPLATES.get(agent, DEFAULT_TEMPLATE)
-    return template.format(agent=agent, session_id=shlex.quote(session_id))
+    return template.format(agent=agent, session_id=shlex.quote(str(session_id)))
 
 
 def full_resume_command(path: str, agent: str, session_id: str) -> str:

@@ -28,6 +28,22 @@ def _color_pri(p: str) -> str:
     return _c(_PRI_COLORS.get(p, "0"), p) if p in _PRI_COLORS else p
 
 
+def _highlight(text: str, query: str) -> str:
+    """Dim the text but bold+yellow the search term."""
+    if not query or not _use_color():
+        return _c("2", text)
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    # Split on matches, dim non-match parts, bold+yellow match parts
+    parts = pattern.split(text)
+    matches = pattern.findall(text)
+    result = []
+    for i, part in enumerate(parts):
+        result.append(_c("2", part))
+        if i < len(matches):
+            result.append(_c("1;33", matches[i]))
+    return "".join(result)
+
+
 def _color_score(v: float) -> str:
     code = "32" if v >= 0.7 else "33" if v >= 0.4 else "31"
     return _c(code, f"{v:.2f}")
@@ -37,6 +53,61 @@ def _pad(text: str, width: int) -> str:
     """Pad text to width, accounting for ANSI escape sequences."""
     visible_len = len(re.sub(r"\033\[[0-9;]*m", "", text))
     return text + " " * max(0, width - visible_len)
+
+
+def _compact_tokens(n: int | None) -> str:
+    """Format token count compactly: 1234 → 1.2k, 1234567 → 1.2M."""
+    if n is None or n == 0:
+        return ""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
+def _format_tokens(s: dict) -> str:
+    """Compact token summary for a session."""
+    total = s.get("total_tokens")
+    if not total:
+        return ""
+    out = _compact_tokens(s.get("output_tokens"))
+    cache = _compact_tokens(s.get("cache_read_tokens"))
+    parts = [f"{_compact_tokens(total)} tok"]
+    if out:
+        parts.append(f"{out} out")
+    if cache:
+        parts.append(f"{cache} cache")
+    return " ".join(parts)
+
+
+def _format_activity(s: dict) -> str:
+    """Compact activity summary: turns and tool calls."""
+    user = s.get("user_messages")
+    tools = s.get("tool_calls")
+    parts = []
+    if user:
+        parts.append(f"{user} turns")
+    if tools:
+        parts.append(f"{tools} tools")
+    return " ".join(parts) if parts else ""
+
+
+def _format_duration(secs: float | None) -> str:
+    """Format seconds into a compact duration string."""
+    if secs is None or secs < 0:
+        return ""
+    if secs < 60:
+        return f"{int(secs)}s"
+    mins = secs / 60
+    if mins < 60:
+        return f"{int(mins)}m"
+    hrs = mins / 60
+    if hrs < 24:
+        m = int(mins % 60)
+        return f"{int(hrs)}h{m:02d}m" if m else f"{int(hrs)}h"
+    days = hrs / 24
+    return f"{int(days)}d"
 
 
 def _relative_time(iso: str | None) -> str:
@@ -87,8 +158,32 @@ def print_status(data: dict) -> None:
             agent = s.get("agent", "?")
             title = s.get("title") or "(untitled)"
             when = _relative_time(s.get("started_at"))
-            sid = s.get("session_id", "")[:12]
-            print(f"  [{agent}] {title}  ({when}, {sid})")
+            sid = str(s.get("session_id", ""))[:12]
+            model = s.get("model") or ""
+            model_tag = f" {_c('36', model)}" if model else ""
+            dur = _format_duration(s.get("duration_secs"))
+            dur_tag = f" {_c('33', dur)}" if dur else ""
+            print(f"  [{agent}] {title}  ({when}, {sid}){model_tag}{dur_tag}")
+            # Show harness version and per-message models if available
+            versions = s.get("versions", [])
+            models = s.get("models", [])
+            extras = []
+            if versions:
+                extras.append(f"v{','.join(versions)}")
+            if models:
+                # Only show if different from primary_model
+                extra_models = [m for m in models if m != model]
+                if extra_models:
+                    extras.append(f"also: {', '.join(extra_models)}")
+            # Token usage and activity stats
+            tokens = _format_tokens(s)
+            if tokens:
+                extras.append(tokens)
+            activity = _format_activity(s)
+            if activity:
+                extras.append(activity)
+            if extras:
+                print(f"    {_c('2', ' | '.join(extras))}")
 
     resume_cmd = data.get("resume_cmd")
     if resume_cmd:
@@ -192,3 +287,17 @@ def print_search(results: list[dict], query: str) -> None:
             match[:30].ljust(30),
         ]
         print("  ".join(row))
+
+        # Show snippets for content matches
+        snippets = p.get("snippets", [])
+        if snippets:
+            for snip in snippets[:2]:
+                display = snip.replace("\n", " ")[:200]
+                print(f"    {_highlight(display, query)}")
+
+        # Show matching titles
+        titles = p.get("matching_titles", [])
+        if titles:
+            for t in titles[:2]:
+                display = t.replace("\n", " ")[:200] if t else ""
+                print(f"    {_highlight(display, query)}")

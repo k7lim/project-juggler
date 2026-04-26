@@ -6,9 +6,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import cache, cass_facade, state
-
-ANNOTATIONS_PATH = Path.home() / ".local" / "share" / "pj" / "annotations.jsonl"
+from . import cache, state
+from .session_store import get_store
+from .paths import annotations_path
 
 
 def project_id(path: str) -> str:
@@ -18,10 +18,11 @@ def project_id(path: str) -> str:
 def _read_annotations() -> dict[str, dict]:
     """Replay annotations.jsonl into per-project state keyed by project_id."""
     projects: dict[str, dict] = {}
-    if not ANNOTATIONS_PATH.exists():
+    ann_path = annotations_path()
+    if not ann_path.exists():
         return projects
     try:
-        with open(ANNOTATIONS_PATH) as f:
+        with open(ann_path) as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -128,7 +129,7 @@ def discover(
     if cached is not None:
         projects = cached
     else:
-        cass_projects = cass_facade.list_projects()
+        cass_projects = get_store().list_projects()
         annotations = _read_annotations()
         seen_paths: set[str] = set()
         projects = []

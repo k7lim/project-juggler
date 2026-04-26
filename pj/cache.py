@@ -4,36 +4,43 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
-from . import cass_facade
-
-CACHE_DIR = Path.home() / ".cache" / "pj"
-CACHE_FILE = CACHE_DIR / "project_index.json"
-ANNOTATIONS_PATH = Path.home() / ".local" / "share" / "pj" / "annotations.jsonl"
+from .paths import annotations_path, cache_dir, cache_file
+from .session_store import get_store
 
 
 def _signatures() -> dict:
     sigs: dict[str, float] = {}
-    db = cass_facade.db_path()
-    if db:
+    # Backend-specific cache key: check all DB files the store reads
+    store = get_store()
+    if hasattr(store, "db_paths"):
+        for db in store.db_paths():
+            try:
+                sigs[f"db_mtime:{db}"] = os.stat(db).st_mtime
+            except OSError:
+                pass
+    elif hasattr(store, "db_path"):
+        db = store.db_path()
+        if db:
+            try:
+                sigs["db_mtime"] = os.stat(db).st_mtime
+            except OSError:
+                pass
+    ann_path = annotations_path()
+    if ann_path.exists():
         try:
-            sigs["cass_db_mtime"] = os.stat(db).st_mtime
-        except OSError:
-            pass
-    if ANNOTATIONS_PATH.exists():
-        try:
-            sigs["annotations_mtime"] = os.stat(ANNOTATIONS_PATH).st_mtime
+            sigs["annotations_mtime"] = os.stat(ann_path).st_mtime
         except OSError:
             pass
     return sigs
 
 
 def load() -> list[dict] | None:
-    if not CACHE_FILE.exists():
+    cf = cache_file()
+    if not cf.exists():
         return None
     try:
-        with open(CACHE_FILE) as f:
+        with open(cf) as f:
             cached = json.load(f)
         if cached.get("signatures") != _signatures():
             return None
@@ -43,6 +50,7 @@ def load() -> list[dict] | None:
 
 
 def save(projects: list[dict]) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_FILE, "w") as f:
+    cd = cache_dir()
+    cd.mkdir(parents=True, exist_ok=True)
+    with open(cd / "project_index.json", "w") as f:
         json.dump({"signatures": _signatures(), "projects": projects}, f)
