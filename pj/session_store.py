@@ -24,11 +24,16 @@ class SessionStore(Protocol):
         """Whether this backend has any data to offer."""
         ...
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self, detail: bool = False) -> list[dict]:
         """All projects with agent, session count, and last active.
 
         Returns list of:
             {"path": str, "agents": [str], "session_count": int, "last_active": str|None}
+
+        When detail=True, also includes:
+            "first_active": str|None,       # ISO8601 of earliest session
+            "total_duration_secs": float,   # Sum of all session durations
+            "models": [str],                # Distinct model names used
         """
         ...
 

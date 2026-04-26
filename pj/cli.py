@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sort order (default: last-active)",
     )
     ls.add_argument("--tag", help="Filter by tag")
+    ls.add_argument("--detail", action="store_true", help="Include hours, models, first session (slower)")
     ls.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     ls.add_argument("--offset", type=int, default=0, help="Skip N results (default: 0)")
 
@@ -76,6 +77,7 @@ def _cmd_list(args: argparse.Namespace) -> None:
         sort=args.sort,
         limit=args.limit,
         offset=args.offset,
+        detail=args.detail,
     )
     latency_ms = int((time.monotonic() - start) * 1000)
 

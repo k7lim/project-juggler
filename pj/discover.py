@@ -66,7 +66,7 @@ def _build_project(path: str, cass_data: dict | None, ann: dict) -> dict:
     archived = ann.get("archived", False)
     last_active = cass_data["last_active"] if cass_data else None
 
-    return {
+    proj = {
         "id": pid,
         "name": Path(path).name,
         "path": path,
@@ -78,6 +78,12 @@ def _build_project(path: str, cass_data: dict | None, ann: dict) -> dict:
         "tags": ann.get("tags", []),
         "latest_note": latest_note,
     }
+    # Pass through detail fields when present
+    if cass_data:
+        for key in ("first_active", "total_duration_secs", "models"):
+            if key in cass_data:
+                proj[key] = cass_data[key]
+    return proj
 
 
 def resolve_project(query: str) -> dict | None:
@@ -123,13 +129,14 @@ def discover(
     sort: str = "last-active",
     limit: int = 20,
     offset: int = 0,
+    detail: bool = False,
 ) -> tuple[list[dict], int]:
     """Discover projects from CASS + annotations. Returns (page, total)."""
-    cached = cache.load()
+    cached = cache.load() if not detail else None
     if cached is not None:
         projects = cached
     else:
-        cass_projects = get_store().list_projects()
+        cass_projects = get_store().list_projects(detail=detail)
         annotations = _read_annotations()
         seen_paths: set[str] = set()
         projects = []

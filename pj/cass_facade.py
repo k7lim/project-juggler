@@ -77,23 +77,41 @@ def _query_all(sql: str, params: tuple = ()) -> list[tuple]:
     return results
 
 
-def list_projects() -> list[dict]:
+def list_projects(detail: bool = False) -> list[dict]:
     """All workspaces with agent, session count, and last active timestamp.
 
     Returns list of:
         {"path": str, "agents": [str], "session_count": int, "last_active": str|None}
+
+    When detail=True, also includes:
+        "first_active", "total_duration_secs", "models"
     """
-    rows = _query_all(
-        "SELECT w.path, COALESCE(a.slug, 'unknown'), COUNT(c.id), MAX(c.started_at) "
-        "FROM conversations c "
-        "JOIN workspaces w ON c.workspace_id = w.id "
-        "LEFT JOIN agents a ON c.agent_id = a.id "
-        "GROUP BY w.path, a.slug "
-        "ORDER BY MAX(c.started_at) DESC"
-    )
+    if detail:
+        rows = _query_all(
+            "SELECT w.path, COALESCE(a.slug, 'unknown'), COUNT(c.id), "
+            "       MAX(c.started_at), MIN(c.started_at), "
+            "       SUM(CASE WHEN c.ended_at IS NOT NULL AND c.started_at IS NOT NULL "
+            "           THEN (c.ended_at - c.started_at) / 1000.0 ELSE 0 END), "
+            "       GROUP_CONCAT(DISTINCT c.primary_model) "
+            "FROM conversations c "
+            "JOIN workspaces w ON c.workspace_id = w.id "
+            "LEFT JOIN agents a ON c.agent_id = a.id "
+            "GROUP BY w.path, a.slug "
+            "ORDER BY MAX(c.started_at) DESC"
+        )
+    else:
+        rows = _query_all(
+            "SELECT w.path, COALESCE(a.slug, 'unknown'), COUNT(c.id), "
+            "       MAX(c.started_at), NULL, NULL, NULL "
+            "FROM conversations c "
+            "JOIN workspaces w ON c.workspace_id = w.id "
+            "LEFT JOIN agents a ON c.agent_id = a.id "
+            "GROUP BY w.path, a.slug "
+            "ORDER BY MAX(c.started_at) DESC"
+        )
 
     grouped: dict[str, dict] = {}
-    for path, agent, count, last_active_ms in rows:
+    for path, agent, count, last_active_ms, first_ms, dur_secs, models_csv in rows:
         if path not in grouped:
             grouped[path] = {
                 "path": path,
@@ -101,6 +119,10 @@ def list_projects() -> list[dict]:
                 "session_count": 0,
                 "last_active": None,
             }
+            if detail:
+                grouped[path].update(
+                    first_active=None, total_duration_secs=0.0, models=set(),
+                )
         g = grouped[path]
         if agent not in g["agents"]:
             g["agents"].append(agent)
@@ -109,6 +131,22 @@ def list_projects() -> list[dict]:
             iso = datetime.fromtimestamp(last_active_ms / 1000, tz=timezone.utc).isoformat()
             if g["last_active"] is None or iso > g["last_active"]:
                 g["last_active"] = iso
+        if detail:
+            if first_ms:
+                first_iso = datetime.fromtimestamp(first_ms / 1000, tz=timezone.utc).isoformat()
+                if g["first_active"] is None or first_iso < g["first_active"]:
+                    g["first_active"] = first_iso
+            if dur_secs:
+                g["total_duration_secs"] += dur_secs
+            if models_csv:
+                for m in models_csv.split(","):
+                    m = m.strip()
+                    if m:
+                        g["models"].add(m)
+
+    if detail:
+        for g in grouped.values():
+            g["models"] = sorted(g["models"])
 
     return list(grouped.values())
 
