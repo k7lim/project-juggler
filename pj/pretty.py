@@ -190,10 +190,39 @@ def print_status(data: dict) -> None:
         print(f"\nResume:\n  {resume_cmd}")
 
 
+def _format_hours(secs: float | None) -> str:
+    """Format total seconds as compact hours string."""
+    if not secs or secs <= 0:
+        return ""
+    hrs = secs / 3600
+    if hrs < 0.1:
+        return f"{secs / 60:.0f}m"
+    if hrs < 10:
+        return f"{hrs:.1f}h"
+    return f"{hrs:.0f}h"
+
+
+def _short_models(models: list[str]) -> str:
+    """Shorten model names: claude-opus-4-6 → opus, etc."""
+    short = set()
+    for m in models:
+        if "opus" in m:
+            short.add("opus")
+        elif "sonnet" in m:
+            short.add("sonnet")
+        elif "haiku" in m:
+            short.add("haiku")
+        else:
+            short.add(m.split("-")[1] if "-" in m else m[:8])
+    return ",".join(sorted(short))
+
+
 def print_projects(projects: list[dict], total: int, offset: int, limit: int) -> None:
     if not projects:
         print("No projects found.")
         return
+
+    has_detail = any("first_active" in p for p in projects)
 
     cols = [
         ("ID", 8),
@@ -204,6 +233,12 @@ def print_projects(projects: list[dict], total: int, offset: int, limit: int) ->
         ("PRI", 6),
         ("LAST ACTIVE", 11),
     ]
+    if has_detail:
+        cols.extend([
+            ("HOURS", 6),
+            ("MODELS", 16),
+            ("STARTED", 11),
+        ])
 
     header = "  ".join(_c("1", h.ljust(w)) for h, w in cols)
     print(header)
@@ -223,6 +258,12 @@ def print_projects(projects: list[dict], total: int, offset: int, limit: int) ->
             _pad(_color_pri(pri_str[:6]), 6),
             _relative_time(p.get("last_active")).ljust(11),
         ]
+        if has_detail:
+            row.extend([
+                _format_hours(p.get("total_duration_secs")).rjust(6),
+                _pad(_short_models(p.get("models", [])), 16),
+                _relative_time(p.get("first_active")).ljust(11),
+            ])
         print("  ".join(row))
 
     end = min(offset + len(projects), total)
@@ -262,6 +303,8 @@ def print_next(scored: list[dict]) -> None:
 
 
 def print_search(results: list[dict], query: str) -> None:
+    from . import resume as resume_mod
+
     if not results:
         print(f'No results for "{query}".')
         return
@@ -288,16 +331,27 @@ def print_search(results: list[dict], query: str) -> None:
         ]
         print("  ".join(row))
 
-        # Show snippets for content matches
-        snippets = p.get("snippets", [])
-        if snippets:
-            for snip in snippets[:2]:
-                display = snip.replace("\n", " ")[:200]
-                print(f"    {_highlight(display, query)}")
-
-        # Show matching titles
-        titles = p.get("matching_titles", [])
-        if titles:
-            for t in titles[:2]:
-                display = t.replace("\n", " ")[:200] if t else ""
-                print(f"    {_highlight(display, query)}")
+        # Show matching sessions with resume commands
+        sessions = p.get("matching_sessions", [])
+        path = p.get("path", "")
+        if sessions:
+            for s in sessions[:3]:
+                title = (s.get("title") or "(untitled)").replace("\n", " ")[:80]
+                when = _relative_time(s.get("started_at"))
+                sid = str(s.get("session_id", ""))[:12]
+                agent = s.get("agent", "")
+                cmd = resume_mod.full_resume_command(path, agent, s.get("session_id", ""))
+                print(f"    {_highlight(title, query)}  {_c('2', f'({when}, {sid})')}")
+                print(f"      {_c('36', cmd)}")
+        else:
+            # Fallback: show snippets/titles without session info
+            snippets = p.get("snippets", [])
+            if snippets:
+                for snip in snippets[:2]:
+                    display = snip.replace("\n", " ")[:200]
+                    print(f"    {_highlight(display, query)}")
+            titles = p.get("matching_titles", [])
+            if titles:
+                for t in titles[:2]:
+                    display = t.replace("\n", " ")[:200] if t else ""
+                    print(f"    {_highlight(display, query)}")
