@@ -12,6 +12,9 @@ class NormalizedMessage:
     content: str
     author: str | None = None  # model name
     created_at: int | None = None  # ms since epoch
+    branch: str | None = None  # "active", "abandoned", or None
+    uuid: str | None = None
+    parent_uuid: str | None = None
 
 
 @dataclass

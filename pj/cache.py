@@ -11,9 +11,11 @@ from .session_store import get_store
 
 def _signatures() -> dict:
     sigs: dict[str, float] = {}
-    # Backend-specific cache key: check all DB files the store reads
+    # Backend-specific cache key
     store = get_store()
-    if hasattr(store, "db_paths"):
+    if hasattr(store, "cache_signatures"):
+        sigs.update(store.cache_signatures())
+    elif hasattr(store, "db_paths"):
         for db in store.db_paths():
             try:
                 sigs[f"db_mtime:{db}"] = os.stat(db).st_mtime

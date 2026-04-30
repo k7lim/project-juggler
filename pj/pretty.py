@@ -133,6 +133,62 @@ def _relative_time(iso: str | None) -> str:
         return "unknown"
 
 
+def print_chat(data: dict) -> None:
+    """Render a full session conversation as markdown-style output."""
+    title = data.get("title") or "(untitled)"
+    print(_c("1", f"# {title}"))
+    parts = [f"Session: {data.get('session_id', '?')}"]
+    agent = data.get("agent")
+    if agent:
+        parts.append(f"Agent: {agent}")
+    model = data.get("model")
+    if model:
+        parts.append(f"Model: {_c('36', model)}")
+    started = data.get("started_at")
+    if started:
+        parts.append(f"Started: {_relative_time(started)}")
+    print("  ".join(parts))
+    print()
+
+    messages = data.get("messages", [])
+    for msg in messages:
+        role = msg.get("role", "?")
+        branch = msg.get("branch")
+
+        # Abandoned branches get dimmed with a marker
+        if branch == "abandoned":
+            print(_c("2;33", f"  ┆ [{role}] (abandoned branch)"))
+            content = msg.get("content", "")
+            for line in content.split("\n")[:5]:
+                print(_c("2", f"  ┆ {line}"))
+            if content.count("\n") > 5:
+                print(_c("2", f"  ┆ ...({content.count(chr(10)) - 5} more lines)"))
+            print()
+            continue
+
+        # Role header
+        if role == "user":
+            header = _c("1;34", "## User")
+        elif role == "assistant":
+            author = msg.get("author")
+            author_str = f" ({_c('36', author)})" if author else ""
+            header = _c("1;32", "## Assistant") + author_str
+        else:
+            header = _c("2", f"## {role}")
+
+        # Timestamp
+        ts = msg.get("created_at")
+        if ts:
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            header += f"  {_c('2', dt.strftime('%H:%M:%S'))}"
+
+        print(header)
+        print(msg.get("content", ""))
+        print()
+
+    print(_c("2", f"--- {len(messages)} messages ---"))
+
+
 def print_status(data: dict) -> None:
     print(f"Project: {_c('1', data.get('name', '?'))}")
     print(f"  Path:     {data.get('path', '?')}")

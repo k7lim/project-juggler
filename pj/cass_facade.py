@@ -389,6 +389,23 @@ def search_content(query: str, limit: int = 20) -> list[dict]:
     return deduped[:limit]
 
 
+def get_session(
+    session_id: str,
+    *,
+    all_branches: bool = False,
+    include_tools: bool = True,
+    roles: set[str] | None = None,
+) -> dict | None:
+    """CASS indexes metadata only; delegate to fs_store for full sessions."""
+    from . import fs_store
+    return fs_store.get_session(
+        session_id,
+        all_branches=all_branches,
+        include_tools=include_tools,
+        roles=roles,
+    )
+
+
 def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:
     """Extract a snippet around the first occurrence of query in content."""
     lower = content.lower()

@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .parsers import base
-from .parsers import claude_code, codex
+from .parsers import claude_code, codex, kimi
 
 # Registry of available parsers
-_PARSERS = [claude_code, codex]
+_PARSERS = [claude_code, codex, kimi]
 
 
 def _configured_roots() -> list[tuple[str, object]]:
@@ -105,6 +105,17 @@ def _group_by_workspace(
         for g in grouped.values():
             g["models"] = sorted(g["models"])
     return grouped
+
+
+def cache_signatures() -> dict[str, float]:
+    """Return mtimes of session root dirs for cache invalidation."""
+    sigs: dict[str, float] = {}
+    for root, _parser in _configured_roots():
+        try:
+            sigs[f"root_mtime:{root}"] = os.stat(root).st_mtime
+        except OSError:
+            pass
+    return sigs
 
 
 # --- SessionStore interface ---
@@ -238,6 +249,111 @@ def search_content(query: str, limit: int = 20) -> list[dict]:
 
     results.sort(key=lambda r: r["started_at"] or "", reverse=True)
     return results[:limit]
+
+
+def get_session(
+    session_id: str,
+    *,
+    all_branches: bool = False,
+    include_tools: bool = True,
+    roles: set[str] | None = None,
+) -> dict | None:
+    """Load a full session with messages by session_id (or prefix)."""
+    from datetime import datetime, timezone
+
+    for root, parser in _configured_roots():
+        for path in parser.list_sessions(root):
+            # Fast path: check if session_id appears in filename
+            basename = os.path.splitext(os.path.basename(path))[0]
+            if not basename.startswith(session_id) and session_id not in basename:
+                continue
+
+            # Parse with tree-walking for claude_code, plain parse for others
+            if parser.agent_slug == "claude_code":
+                session = parser.parse_session_tree(
+                    path,
+                    all_branches=all_branches,
+                    include_tools=include_tools,
+                    roles=roles,
+                )
+            else:
+                session = parser.parse_session(path)
+
+            if not session:
+                continue
+
+            # Verify match: check both sessionId and filename (subagent files
+            # have the parent's sessionId, so filename is the real identifier)
+            sid_match = session.session_id.startswith(session_id) or session_id in session.session_id
+            file_match = basename.startswith(session_id) or session_id in basename
+            if not sid_match and not file_match:
+                continue
+
+            return _session_to_dict(session)
+
+    # Slower fallback: scan metadata for sessionId match (e.g. Claude Code
+    # files where filename != sessionId)
+    for root, parser in _configured_roots():
+        for path in parser.list_sessions(root):
+            meta = parser.parse_metadata(path)
+            if not meta:
+                continue
+            if not meta.session_id.startswith(session_id) and session_id not in meta.session_id:
+                continue
+
+            if parser.agent_slug == "claude_code":
+                session = parser.parse_session_tree(
+                    path,
+                    all_branches=all_branches,
+                    include_tools=include_tools,
+                    roles=roles,
+                )
+            else:
+                session = parser.parse_session(path)
+
+            if session:
+                return _session_to_dict(session)
+
+    return None
+
+
+def _session_to_dict(session: base.NormalizedSession) -> dict:
+    """Convert NormalizedSession to a plain dict for the envelope."""
+    started_iso = None
+    if session.started_at:
+        started_iso = datetime.fromtimestamp(
+            session.started_at / 1000, tz=timezone.utc,
+        ).isoformat()
+    ended_iso = None
+    if session.ended_at:
+        ended_iso = datetime.fromtimestamp(
+            session.ended_at / 1000, tz=timezone.utc,
+        ).isoformat()
+
+    messages = []
+    for m in session.messages:
+        messages.append({
+            "idx": m.idx,
+            "role": m.role,
+            "content": m.content,
+            "author": m.author,
+            "created_at": m.created_at,
+            "branch": m.branch,
+            "uuid": m.uuid,
+            "parent_uuid": m.parent_uuid,
+        })
+
+    return {
+        "session_id": session.session_id,
+        "agent": session.agent,
+        "source_path": session.source_path,
+        "workspace": session.workspace,
+        "title": session.title,
+        "started_at": started_iso,
+        "ended_at": ended_iso,
+        "model": session.model,
+        "messages": messages,
+    }
 
 
 def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:

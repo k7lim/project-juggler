@@ -85,6 +85,20 @@ class SessionStore(Protocol):
         """
         ...
 
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        all_branches: bool = False,
+        include_tools: bool = True,
+        roles: set[str] | None = None,
+    ) -> dict | None:
+        """Load a full session with messages by session_id.
+
+        Returns dict with session metadata and messages list, or None if not found.
+        """
+        ...
+
 
 # --- Store registry ---
 
