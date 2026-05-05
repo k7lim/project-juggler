@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# OS/editor
+.DS_Store
+.env
+.env.*
+
+# Generated local outputs
+census.html
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+*.db-shm
+*.db-wal
+.beads-credential-key
