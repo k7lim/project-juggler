@@ -1995,7 +1995,7 @@ class FakeStore:
     def available(self) -> bool:
         return True
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self, detail: bool = False) -> list[dict]:
         return self._projects
 
     def recent_session_counts(self, days: int = 7) -> dict[str, int]:
