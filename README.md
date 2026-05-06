@@ -22,11 +22,11 @@ cd project-juggler
 # Run directly
 python3 -m pj list --pretty
 
-# Or add an alias
-alias pj='python3 -m /path/to/project-juggler/pj'
+# Or install the pj command in editable mode
+python3 -m pip install -e .
 ```
 
-No `pip install` needed. No external packages.
+Editable install is optional. There are no runtime dependencies.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ pj list --pretty
 pj next --pretty
 
 # Deep dive into a project
-pj status myproject --pretty
+pj show myproject --pretty
 
 # Search across all sessions
 pj search "authentication" --pretty
@@ -109,10 +109,10 @@ pj next --pretty
 3    0.45   old-dashboard                 dormant   none    baseline score
 ```
 
-### `pj status` — Deep dive into a project
+### `pj show` — Deep dive into a project
 
 ```bash
-pj status myproject --pretty
+pj show myproject --pretty
 ```
 
 Shows project metadata, recent sessions with models and durations, and a resume command for the latest session.
@@ -148,6 +148,8 @@ Notes starting with `blocked:` mark the project as blocked and exclude it from `
 - `~/.codex/sessions/` — Codex
 
 **CASS store** (optional): if you have a [CASS](https://github.com/anthropics/cass) database, set `PJ_BACKEND=cass` for faster full-text search via SQLite FTS5.
+
+See `docs/cass-provider-watch.md` for the current provider stance: filesystem scan is the freshness baseline, while CASS stays behind the `SessionStore` boundary as a richer future provider.
 
 ### Project states
 
@@ -212,7 +214,7 @@ pj next --limit 3
 pj resume myproject
 
 # Get full project context
-pj status myproject --sessions 5
+pj show myproject --sessions 5
 ```
 
 The `--pretty` flag is for humans. Omit it when piping to agents or scripts.

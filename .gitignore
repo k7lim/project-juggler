@@ -1,3 +1,22 @@
+# OS/editor noise
+.DS_Store
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local research/source checkouts and generated reports
+repos/
+agent-local-cli-reading/
+census.html
 
 # Beads / Dolt files (added by bd init)
 .dolt/

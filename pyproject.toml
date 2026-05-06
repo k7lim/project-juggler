@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-juggler"
+version = "0.1.0"
+description = "CLI for finding, triaging, and resuming local AI coding-agent sessions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Kevin Lim" }
+]
+keywords = ["agents", "cli", "productivity", "session-search"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.scripts]
+pj = "pj.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pj*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
