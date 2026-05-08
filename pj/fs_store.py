@@ -148,12 +148,10 @@ def _signature_paths(session_path: str) -> list[str]:
         return []
 
     files: list[str] = []
-    try:
-        for dirpath, _dirnames, filenames in os.walk(session_path):
-            for filename in filenames:
-                files.append(os.path.join(dirpath, filename))
-    except OSError:
-        return []
+    for filename in ("state.json", "wire.jsonl", "context.jsonl"):
+        path = os.path.join(session_path, filename)
+        if os.path.isfile(path):
+            files.append(path)
     return files
 
 
