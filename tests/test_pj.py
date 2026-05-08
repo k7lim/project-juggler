@@ -15,6 +15,7 @@ import pj.state as state
 import pj.cass_facade as cass_facade
 import pj.cache as cache
 import pj.discover as discover
+import pj.fs_store as fs_store
 import pj.pretty as pretty
 import pj.cli as cli
 import pj.annotate as annotate
@@ -22,6 +23,7 @@ import pj.schedule as schedule
 import pj.resume as resume
 import pj.search as search_mod
 import pj.session_store as session_store
+from pj.parsers import codex
 import pytest
 
 
@@ -277,6 +279,28 @@ def test_cache_invalidation():
         with mock.patch("pj.cache.cache_file", return_value=cf), \
              mock.patch.object(cache, "_signatures", return_value=sig2):
             assert cache.load() is None
+
+
+def test_fs_store_cache_signature_tracks_session_file_changes():
+    """Appending to an existing nested session file should invalidate pj list cache."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        session_file = root / "2026" / "05" / "07" / "rollout-test.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_file.write_text(
+            json.dumps({"type": "session_meta", "timestamp": "2026-05-07T10:00:00Z"}) + "\n"
+        )
+
+        with mock.patch.object(fs_store, "_configured_roots", return_value=[(str(root), codex)]):
+            sig1 = fs_store.cache_signatures()
+            session_file.write_text(
+                session_file.read_text()
+                + json.dumps({"type": "event_msg", "timestamp": "2026-05-07T10:05:00Z"})
+                + "\n"
+            )
+            sig2 = fs_store.cache_signatures()
+
+        assert sig1 != sig2
 
 
 # --- pretty ---
