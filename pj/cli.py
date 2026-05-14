@@ -181,6 +181,18 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--offset", type=int, default=0, help="Skip first N messages")
     chat_p.add_argument("--last", type=int, default=None, help="Show only last N messages")
 
+    census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
+    census_p.add_argument("census_action", nargs="?", choices=["serve"], help="Start the live dashboard server")
+    census_p.add_argument("--limit", type=int, default=10000, help="Max projects (default: 10000)")
+    census_p.add_argument("--host", default="127.0.0.1", help="Serve host (default: 127.0.0.1)")
+    census_p.add_argument("--port", type=int, default=8765, help="Serve port (default: 8765)")
+    census_p.add_argument(
+        "--check-interval",
+        type=int,
+        default=60,
+        help="Seconds between session signature checks while serving (default: 60)",
+    )
+
     return parser
 
 
@@ -348,6 +360,24 @@ def _cmd_chat(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
 
 
+def _cmd_census(args: argparse.Namespace) -> None:
+    if args.census_action == "serve":
+        from . import census_server
+
+        census_server.serve(
+            host=args.host,
+            port=args.port,
+            limit=args.limit,
+            check_interval=args.check_interval,
+        )
+        return
+
+    from . import census
+
+    snap = census.snapshot(limit=args.limit)
+    print(envelope.to_json(envelope.ok(snap["rows"], **snap["meta"])))
+
+
 def _cmd_annotate(action) -> None:
     start = time.monotonic()
     event = action()
@@ -396,3 +426,5 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_search(args)
     elif args.command == "chat":
         _cmd_chat(args)
+    elif args.command == "census":
+        _cmd_census(args)

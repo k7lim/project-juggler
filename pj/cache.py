@@ -37,6 +37,11 @@ def _signatures() -> dict:
     return sigs
 
 
+def signatures() -> dict:
+    """Return the current cache invalidation signatures."""
+    return _signatures()
+
+
 def load() -> list[dict] | None:
     cf = cache_file()
     if not cf.exists():
