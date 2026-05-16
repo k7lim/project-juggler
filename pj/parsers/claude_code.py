@@ -237,10 +237,16 @@ def parse_metadata(path: str) -> NormalizedSession | None:
     """Fast metadata-only parse: read first+last few lines."""
     try:
         with open(path) as f:
-            lines = [l.strip() for l in f if l.strip()]
+            head_lines = [next(f, "").strip() for _ in range(20)]
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 8192))
+            tail_lines = f.read().decode("utf-8", errors="replace").splitlines()[-5:]
     except OSError:
         return None
 
+    lines = [line for line in head_lines + tail_lines if line]
     if not lines:
         return None
 
@@ -251,7 +257,9 @@ def parse_metadata(path: str) -> NormalizedSession | None:
     title = None
     timestamps = []
 
-    for line in lines[:20]:  # scan head for metadata
+    for line in head_lines:  # scan head for metadata
+        if not line:
+            continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -278,7 +286,9 @@ def parse_metadata(path: str) -> NormalizedSession | None:
                     title = first_line[:100]
 
     # Scan tail for end timestamp
-    for line in lines[-5:]:
+    for line in tail_lines:
+        if not line:
+            continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:

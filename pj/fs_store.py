@@ -108,14 +108,51 @@ def _group_by_workspace(
 
 
 def cache_signatures() -> dict[str, float]:
-    """Return mtimes of session root dirs for cache invalidation."""
-    sigs: dict[str, float] = {}
-    for root, _parser in _configured_roots():
+    """Return session collection stats for cache invalidation.
+
+    Session files are usually nested below the detected roots. A running
+    session appends to an existing JSONL file, which does not necessarily
+    update the top-level root directory mtime, so include cheap aggregate
+    stats from the actual session files.
+    """
+    sigs: dict[str, int | float] = {}
+    for root, parser in _configured_roots():
+        prefix = f"{getattr(parser, 'agent_slug', 'agent')}:{root}"
         try:
-            sigs[f"root_mtime:{root}"] = os.stat(root).st_mtime
+            sigs[f"root_mtime:{prefix}"] = os.stat(root).st_mtime_ns
         except OSError:
             pass
+        session_count = 0
+        newest_mtime = 0
+        total_size = 0
+        for session_path in parser.list_sessions(root):
+            session_count += 1
+            for sig_path in _signature_paths(session_path):
+                try:
+                    st = os.stat(sig_path)
+                except OSError:
+                    continue
+                newest_mtime = max(newest_mtime, st.st_mtime_ns)
+                total_size += st.st_size
+        sigs[f"session_count:{prefix}"] = session_count
+        sigs[f"session_newest_mtime:{prefix}"] = newest_mtime
+        sigs[f"session_total_size:{prefix}"] = total_size
     return sigs
+
+
+def _signature_paths(session_path: str) -> list[str]:
+    """Files whose stats represent a parser session path."""
+    if os.path.isfile(session_path):
+        return [session_path]
+    if not os.path.isdir(session_path):
+        return []
+
+    files: list[str] = []
+    for filename in ("state.json", "wire.jsonl", "context.jsonl"):
+        path = os.path.join(session_path, filename)
+        if os.path.isfile(path):
+            files.append(path)
+    return files
 
 
 # --- SessionStore interface ---
