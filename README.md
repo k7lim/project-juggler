@@ -39,7 +39,7 @@ pj list --pretty
 pj next --pretty
 
 # Deep dive into a project
-pj status myproject --pretty
+pj show myproject --pretty
 
 # Search across all sessions
 pj search "authentication" --pretty
@@ -110,7 +110,7 @@ pj next --pretty
 3    0.45   old-dashboard                 dormant   none    baseline score
 ```
 
-### `pj show` - Deep Dive Into A Project
+### `pj show` - Deep dive into a project
 
 ```bash
 pj show myproject --pretty
@@ -218,7 +218,7 @@ pj next --limit 3
 pj resume myproject
 
 # Get full project context
-pj status myproject --sessions 5
+pj show myproject --sessions 5
 ```
 
 The `--pretty` flag is for humans. Omit it when piping to agents or scripts.
