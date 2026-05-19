@@ -9,6 +9,23 @@ from . import annotate, discover, envelope, pretty, resume, schedule
 from . import search as search_mod
 from .session_store import get_store
 
+SEARCH_HELP = """\
+Search examples:
+  pj search sport --pretty
+  pj search football soccer --pretty
+  pj search football soccer --match all --project epic-odds --pretty
+  pj search 'foot(ball)?|soccer' --regex --project epic-odds --pretty
+  pj search sport --sort relevance --pretty
+  pj search soccer --sort oldest --pretty
+
+Query strategy:
+  Separate words are separate terms. Use this for exploratory agent searches.
+  A quoted multi-word query is an exact substring phrase and can miss related sessions.
+  Use --project to search within one project before broadening.
+  Use --match all when every term must appear; default is --match any.
+  Use --regex for alternatives, stems, and spelling variants.
+"""
+
 
 # --- Usage hints (shown when required args are missing) ---
 
@@ -44,13 +61,7 @@ Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|olde
 
   Search projects and session content by keyword.
 
-  Examples:
-    pj search "kimi crash" --pretty
-    pj search football soccer --project epic-odds --pretty
-    pj search "foot(ball)?|soccer" --regex --project epic-odds
-    pj search sport --sort relevance --pretty
-    pj search soccer --sort oldest --pretty
-    pj search geometric_zen --limit 5""",
+""" + SEARCH_HELP,
 
     "resume": """\
 Usage: pj resume <project>
@@ -163,7 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     res = sub.add_parser("resume", help="Output cd + agent --resume for most recent session")
     res.add_argument("project", nargs="?", help="Project name, path, or ID prefix")
 
-    srch = sub.add_parser("search", help="Search projects by keyword")
+    srch = sub.add_parser(
+        "search",
+        help="Search projects by keyword",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=SEARCH_HELP,
+    )
     srch.add_argument("query", nargs="*", help="Search query term(s)")
     srch.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     srch.add_argument(

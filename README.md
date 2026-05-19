@@ -89,7 +89,10 @@ pj search "foot(ball)?|soccer" --regex --project epic-odds
 Search accepts multiple terms. By default, multiple terms mean "any term";
 use `--match all` to require every term. `--project` restricts the search to a
 project name, path, or ID prefix. `--sort` can be `newest`, `relevance`, or
-`oldest`.
+`oldest`. For exploratory searches, prefer separate terms over quoted phrases:
+`pj search sports broadcast fan excitement` is broader than
+`pj search "sports broadcast fan excitement"`, which looks for that exact
+substring. Use `--regex` for alternatives, stems, and spelling variants.
 
 ```
 Search: "groatnola" — 1 result(s)

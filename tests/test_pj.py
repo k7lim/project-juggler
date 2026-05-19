@@ -938,6 +938,13 @@ def test_pretty_search_no_results(capsys):
     assert "No results" in capsys.readouterr().out
 
 
+def test_pretty_search_no_results_suggests_split_terms(capsys):
+    pretty.print_search([], "sports broadcast fan excitement")
+    out = capsys.readouterr().out
+    assert "exact phrases" in out
+    assert "pj search sports broadcast fan excitement --pretty" in out
+
+
 def test_pretty_search_with_results(capsys):
     results = [{
         "name": "api-gateway", "state": "active",
@@ -1015,6 +1022,18 @@ def test_cli_search_pretty(capsys):
 
     out = capsys.readouterr().out
     assert "search-pretty" in out
+
+
+def test_cli_search_help_teaches_query_strategy(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["search", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--regex" in out
+    assert "--project" in out
+    assert "Query strategy" in out
+    assert "quoted multi-word query is an exact substring phrase" in out
 
 
 # --- discover latest_note ---

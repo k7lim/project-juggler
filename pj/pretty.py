@@ -365,6 +365,9 @@ def print_search(results: list[dict], query: str | list[str]) -> None:
     label = " ".join(query) if isinstance(query, list) else query
     if not results:
         print(f'No results for "{label}".')
+        if isinstance(query, str) and " " in query.strip():
+            terms = " ".join(query.split())
+            print(f"Hint: quoted multi-word queries are exact phrases. Try: pj search {terms} --pretty")
         return
 
     print(f'Search: "{label}" — {len(results)} result(s)\n')
