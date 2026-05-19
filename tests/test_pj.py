@@ -24,6 +24,7 @@ import pj.resume as resume
 import pj.search as search_mod
 import pj.session_store as session_store
 from pj.parsers import codex
+from pj.parsers.base import NormalizedMessage, NormalizedSession
 import pytest
 
 
@@ -301,6 +302,50 @@ def test_fs_store_cache_signature_tracks_session_file_changes():
             sig2 = fs_store.cache_signatures()
 
         assert sig1 != sig2
+
+
+def test_fs_store_search_content_applies_limit_after_recency_sort():
+    """Root/file order should not crowd newer matches out of a limited search."""
+
+    class FakeParser:
+        agent_slug = "fake"
+
+        def list_sessions(self, root: str) -> list[str]:
+            return ["old", "new"]
+
+        def parse_metadata(self, path: str) -> NormalizedSession:
+            started_at = 1000 if path == "old" else 2000
+            return NormalizedSession(
+                session_id=path,
+                agent=self.agent_slug,
+                source_path=path,
+                workspace=f"/tmp/{path}",
+                started_at=started_at,
+            )
+
+        def parse_session(self, path: str) -> NormalizedSession:
+            started_at = 1000 if path == "old" else 2000
+            return NormalizedSession(
+                session_id=path,
+                agent=self.agent_slug,
+                source_path=path,
+                workspace=f"/tmp/{path}",
+                title=path,
+                started_at=started_at,
+                messages=[
+                    NormalizedMessage(
+                        idx=0,
+                        role="user",
+                        content=f"{path} sports discussion",
+                    )
+                ],
+            )
+
+    with mock.patch.object(fs_store, "_configured_roots", return_value=[("/tmp/root", FakeParser())]):
+        results = fs_store.search_content("sport", limit=1)
+
+    assert len(results) == 1
+    assert results[0]["path"] == "/tmp/new"
 
 
 # --- pretty ---
@@ -2011,10 +2056,11 @@ def test_search_integration_merges_content_with_name():
 class FakeStore:
     """Minimal SessionStore implementation for contract testing."""
 
-    def __init__(self, projects=None, sessions=None, content=None):
+    def __init__(self, projects=None, sessions=None, content=None, full_sessions=None):
         self._projects = projects or []
         self._sessions = sessions or []
         self._content = content or []
+        self._full_sessions = full_sessions or {}
 
     def available(self) -> bool:
         return True
@@ -2031,11 +2077,21 @@ class FakeStore:
     def session_details(self, session_ids: list) -> dict:
         return {}
 
-    def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+    def search_sessions(self, query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
         return []
 
-    def search_content(self, query: str, limit: int = 20) -> list[dict]:
+    def search_content(self, query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
         return [h for h in self._content if query.lower() in h.get("snippet", "").lower()][:limit]
+
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        all_branches: bool = False,
+        include_tools: bool = True,
+        roles: set[str] | None = None,
+    ) -> dict | None:
+        return self._full_sessions.get(str(session_id))
 
 
 def test_store_swap_discover_uses_new_backend():
@@ -2079,6 +2135,68 @@ def test_store_swap_search_uses_new_backend():
         assert len(results) == 1
         assert "content" in results[0]["match_fields"]
         assert "hackathon" in results[0]["snippets"][0]
+    finally:
+        session_store._store = old_store
+
+
+def test_search_project_filter_scopes_multi_term_content():
+    """--project should constrain multi-term content search to one workspace."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = FakeStore(
+        projects=[
+            {"path": "/proj/epic-odds", "agents": ["codex"], "session_count": 1, "last_active": now_iso},
+            {"path": "/proj/other", "agents": ["codex"], "session_count": 1, "last_active": now_iso},
+        ],
+        sessions=[
+            {"_path": "/proj/epic-odds", "session_id": "epic-1", "agent": "codex",
+             "title": "odds", "started_at": now_iso},
+            {"_path": "/proj/other", "session_id": "other-1", "agent": "codex",
+             "title": "other", "started_at": now_iso},
+        ],
+        full_sessions={
+            "epic-1": {"messages": [{"content": "football odds and soccer odds"}]},
+            "other-1": {"messages": [{"content": "football odds and soccer odds"}]},
+        },
+    )
+    old_store = session_store._store
+    try:
+        session_store.set_store(fake)
+        with mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            results = search_mod.search(["football", "soccer"], project="epic-odds")
+        assert len(results) == 1
+        assert results[0]["path"] == "/proj/epic-odds"
+        assert results[0]["query_terms"] == ["football", "soccer"]
+    finally:
+        session_store._store = old_store
+
+
+def test_search_regex_all_terms():
+    """Regex terms should be applied exactly during scanned searches."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = FakeStore(
+        projects=[{"path": "/proj/epic-odds", "agents": ["codex"], "session_count": 2, "last_active": now_iso}],
+        sessions=[
+            {"_path": "/proj/epic-odds", "session_id": "match", "agent": "codex",
+             "title": "match", "started_at": now_iso},
+            {"_path": "/proj/epic-odds", "session_id": "miss", "agent": "codex",
+             "title": "miss", "started_at": now_iso},
+        ],
+        full_sessions={
+            "match": {"messages": [{"content": "football and soccer both appear"}]},
+            "miss": {"messages": [{"content": "soccer only"}]},
+        },
+    )
+    old_store = session_store._store
+    try:
+        session_store.set_store(fake)
+        with mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            results = search_mod.search([r"foot(ball)?", "soccer"], project="epic", match="all", regex=True)
+        assert len(results) == 1
+        assert results[0]["matching_sessions"][0]["session_id"] == "match"
     finally:
         session_store._store = old_store
 

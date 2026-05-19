@@ -217,7 +217,7 @@ def session_details(session_ids: list) -> dict:
     return {}
 
 
-def search_sessions(query: str, limit: int = 20) -> list[dict]:
+def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search session titles for substring matches."""
     query_lower = query.lower()
     results = []
@@ -237,54 +237,91 @@ def search_sessions(query: str, limit: int = 20) -> list[dict]:
                     "title": meta.title,
                     "started_at": iso,
                 })
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+
+    if sort == "oldest":
+        results.sort(key=lambda r: r["started_at"] or "")
+    elif sort == "relevance":
+        results.sort(
+            key=lambda r: (
+                _count_occurrences(r.get("title") or "", query),
+                r["started_at"] or "",
+            ),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
     return results[:limit]
 
 
-def search_content(query: str, limit: int = 20) -> list[dict]:
+def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search message content via substring match (no index)."""
-    query_lower = query.lower()
     results: list[dict] = []
     seen_sessions: set[str] = set()
+    candidates: list[tuple[int, str, object]] = []
 
     for root, parser in _configured_roots():
         for path in parser.list_sessions(root):
-            session = parser.parse_session(path)
-            if not session:
+            meta = parser.parse_metadata(path)
+            started_at = meta.started_at if meta and meta.started_at else 0
+            candidates.append((started_at, path, parser))
+
+    candidates.sort(key=lambda c: c[0], reverse=(sort != "oldest"))
+
+    for _, path, parser in candidates:
+        session = parser.parse_session(path)
+        if not session:
+            continue
+
+        match_count = 0
+        first_snippet = ""
+        first_role = ""
+        for msg in session.messages:
+            count = _count_occurrences(msg.content, query)
+            if count == 0:
                 continue
-
-            for msg in session.messages:
-                if query_lower in msg.content.lower():
-                    key = f"{session.agent}:{session.session_id}"
-                    if key in seen_sessions:
-                        break
-                    seen_sessions.add(key)
-
-                    snippet = _extract_snippet(msg.content, query)
-                    iso = None
-                    if session.started_at:
-                        iso = datetime.fromtimestamp(
-                            session.started_at / 1000, tz=timezone.utc
-                        ).isoformat()
-
-                    results.append({
-                        "path": session.workspace or "",
-                        "session_id": session.session_id,
-                        "agent": session.agent,
-                        "title": session.title,
-                        "snippet": snippet,
-                        "role": msg.role,
-                        "started_at": iso,
-                        "match_type": "grep",
-                    })
-                    break  # one hit per session
-
-            if len(results) >= limit:
+            match_count += count
+            if not first_snippet:
+                first_snippet = _extract_snippet(msg.content, query)
+                first_role = msg.role
+            if sort != "relevance":
                 break
-        if len(results) >= limit:
+
+        if match_count:
+            key = f"{session.agent}:{session.session_id}"
+            if key in seen_sessions:
+                continue
+            seen_sessions.add(key)
+
+            iso = None
+            if session.started_at:
+                iso = datetime.fromtimestamp(
+                    session.started_at / 1000, tz=timezone.utc
+                ).isoformat()
+
+            results.append({
+                "path": session.workspace or "",
+                "session_id": session.session_id,
+                "agent": session.agent,
+                "title": session.title,
+                "snippet": first_snippet,
+                "role": first_role,
+                "started_at": iso,
+                "match_type": "grep",
+                "match_count": match_count,
+            })
+
+        if sort != "relevance" and len(results) >= limit:
             break
 
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    if sort == "oldest":
+        results.sort(key=lambda r: r["started_at"] or "")
+    elif sort == "relevance":
+        results.sort(
+            key=lambda r: (r.get("match_count") or 0, r["started_at"] or ""),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
     return results[:limit]
 
 
@@ -409,3 +446,9 @@ def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:
     if end < len(content):
         snippet = snippet + "..."
     return snippet
+
+
+def _count_occurrences(text: str, query: str) -> int:
+    if not query:
+        return 0
+    return text.lower().count(query.lower())

@@ -28,11 +28,12 @@ def _color_pri(p: str) -> str:
     return _c(_PRI_COLORS.get(p, "0"), p) if p in _PRI_COLORS else p
 
 
-def _highlight(text: str, query: str) -> str:
+def _highlight(text: str, query: str | list[str]) -> str:
     """Dim the text but bold+yellow the search term."""
     if not query or not _use_color():
         return _c("2", text)
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    terms = [query] if isinstance(query, str) else query
+    pattern = re.compile("|".join(re.escape(term) for term in terms if term), re.IGNORECASE)
     # Split on matches, dim non-match parts, bold+yellow match parts
     parts = pattern.split(text)
     matches = pattern.findall(text)
@@ -358,14 +359,15 @@ def print_next(scored: list[dict]) -> None:
         print("  ".join(row))
 
 
-def print_search(results: list[dict], query: str) -> None:
+def print_search(results: list[dict], query: str | list[str]) -> None:
     from . import resume as resume_mod
 
+    label = " ".join(query) if isinstance(query, list) else query
     if not results:
-        print(f'No results for "{query}".')
+        print(f'No results for "{label}".')
         return
 
-    print(f'Search: "{query}" — {len(results)} result(s)\n')
+    print(f'Search: "{label}" — {len(results)} result(s)\n')
 
     cols = [
         ("NAME", 28),

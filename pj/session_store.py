@@ -66,7 +66,12 @@ class SessionStore(Protocol):
         """
         ...
 
-    def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+    def search_sessions(
+        self,
+        query: str,
+        limit: int = 20,
+        sort: str = "newest",
+    ) -> list[dict]:
         """Search session titles.
 
         Returns list of:
@@ -75,7 +80,12 @@ class SessionStore(Protocol):
         """
         ...
 
-    def search_content(self, query: str, limit: int = 20) -> list[dict]:
+    def search_content(
+        self,
+        query: str,
+        limit: int = 20,
+        sort: str = "newest",
+    ) -> list[dict]:
         """Full-text search across message content.
 
         Returns list of:

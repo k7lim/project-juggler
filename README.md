@@ -80,7 +80,16 @@ Searches project names, paths, notes, tags, session titles, and message content.
 
 ```bash
 pj search "groatnola" --pretty
+pj search football soccer --project epic-odds --pretty
+pj search sport --sort relevance --pretty
+pj search soccer --sort oldest --pretty
+pj search "foot(ball)?|soccer" --regex --project epic-odds
 ```
+
+Search accepts multiple terms. By default, multiple terms mean "any term";
+use `--match all` to require every term. `--project` restricts the search to a
+project name, path, or ID prefix. `--sort` can be `newest`, `relevance`, or
+`oldest`.
 
 ```
 Search: "groatnola" — 1 result(s)

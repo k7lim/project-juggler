@@ -251,15 +251,16 @@ def session_details(session_ids: list[int]) -> dict[int, dict]:
     }
 
 
-def search_sessions(query: str, limit: int = 20) -> list[dict]:
+def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search session titles for substring matches."""
+    order = "ASC" if sort == "oldest" else "DESC"
     rows = _query_all(
         "SELECT c.id, w.path, COALESCE(a.slug, 'unknown'), c.title, c.started_at "
         "FROM conversations c "
         "JOIN workspaces w ON c.workspace_id = w.id "
         "LEFT JOIN agents a ON c.agent_id = a.id "
         "WHERE c.title LIKE ? "
-        "ORDER BY c.started_at DESC "
+        f"ORDER BY c.started_at {order} "
         "LIMIT ?",
         (f"%{query}%", limit),
     )
@@ -276,7 +277,18 @@ def search_sessions(query: str, limit: int = 20) -> list[dict]:
             "title": title,
             "started_at": iso,
         })
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    if sort == "oldest":
+        results.sort(key=lambda r: r["started_at"] or "")
+    elif sort == "relevance":
+        results.sort(
+            key=lambda r: (
+                _count_occurrences(r.get("title") or "", query),
+                r["started_at"] or "",
+            ),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
     return results[:limit]
 
 
@@ -291,7 +303,7 @@ def _fts_available(db: Path) -> bool:
         return False
 
 
-def search_content(query: str, limit: int = 20) -> list[dict]:
+def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Full-text search across session message content.
 
     Tries FTS5 first (fast), falls back to LIKE on messages.content (slow but works).
@@ -312,6 +324,8 @@ def search_content(query: str, limit: int = 20) -> list[dict]:
 
         hits: list[tuple] = []
         match_type = "like"
+
+        time_order = "ASC" if sort == "oldest" else "DESC"
 
         # Try FTS5 first
         try:
@@ -343,7 +357,7 @@ def search_content(query: str, limit: int = 20) -> list[dict]:
                     "JOIN workspaces w ON c.workspace_id = w.id "
                     "LEFT JOIN agents a ON c.agent_id = a.id "
                     "WHERE m.content LIKE ? "
-                    "ORDER BY c.started_at DESC "
+                    f"ORDER BY c.started_at {time_order} "
                     "LIMIT ?",
                     (f"%{query}%", limit * 2),
                 ).fetchall()
@@ -373,10 +387,18 @@ def search_content(query: str, limit: int = 20) -> list[dict]:
                 "role": role,
                 "started_at": iso,
                 "match_type": match_type,
+                "match_count": _count_occurrences(content or "", query),
             })
 
-    # Sort by recency, dedup by (path, session_id), limit
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    if sort == "oldest":
+        results.sort(key=lambda r: r["started_at"] or "")
+    elif sort == "relevance":
+        results.sort(
+            key=lambda r: (r.get("match_count") or 0, r["started_at"] or ""),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
 
     # Keep only the best hit per session (first = most recent message)
     seen_sessions: set[tuple] = set()
@@ -424,3 +446,9 @@ def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:
     if end < len(content):
         snippet = snippet + "..."
     return snippet
+
+
+def _count_occurrences(text: str, query: str) -> int:
+    if not query:
+        return 0
+    return text.lower().count(query.lower())

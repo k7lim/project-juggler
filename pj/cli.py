@@ -39,12 +39,16 @@ Usage: pj chat <session_id> [--pretty] [--no-tools] [--roles ROLES] [--last N]
   Journey: pj list → pj show <project> → pj chat <session_id>""",
 
     "search": """\
-Usage: pj search <query> [--pretty] [--limit N]
+Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|oldest]
 
   Search projects and session content by keyword.
 
   Examples:
     pj search "kimi crash" --pretty
+    pj search football soccer --project epic-odds --pretty
+    pj search "foot(ball)?|soccer" --regex --project epic-odds
+    pj search sport --sort relevance --pretty
+    pj search soccer --sort oldest --pretty
     pj search geometric_zen --limit 5""",
 
     "resume": """\
@@ -158,8 +162,22 @@ def build_parser() -> argparse.ArgumentParser:
     res.add_argument("project", nargs="?", help="Project name, path, or ID prefix")
 
     srch = sub.add_parser("search", help="Search projects by keyword")
-    srch.add_argument("query", nargs="?", help="Search query")
+    srch.add_argument("query", nargs="*", help="Search query term(s)")
     srch.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    srch.add_argument(
+        "--sort",
+        choices=["newest", "relevance", "oldest"],
+        default="newest",
+        help="Sort order: newest, relevance, or oldest (default: newest)",
+    )
+    srch.add_argument("--project", help="Restrict search to project name, path, or ID prefix")
+    srch.add_argument(
+        "--match",
+        choices=["any", "all"],
+        default="any",
+        help="For multiple terms, match any term or require all terms (default: any)",
+    )
+    srch.add_argument("--regex", action="store_true", help="Treat query terms as regular expressions")
     srch.add_argument("--pretty", action="store_true", help="Human-readable output")
 
     chat_p = sub.add_parser("chat", help="Display a full session conversation")
@@ -302,14 +320,33 @@ def _cmd_search(args: argparse.Namespace) -> None:
         _missing_arg("search")
 
     start = time.monotonic()
-    results = search_mod.search(args.query, limit=args.limit)
+    try:
+        results = search_mod.search(
+            args.query,
+            limit=args.limit,
+            sort=args.sort,
+            project=args.project,
+            match=args.match,
+            regex=args.regex,
+        )
+    except ValueError as exc:
+        env = envelope.err(str(exc), source="search")
+        print(envelope.to_json(env))
+        sys.exit(1)
     latency_ms = int((time.monotonic() - start) * 1000)
 
     if args.pretty:
         pretty.print_search(results, args.query)
     else:
         env = envelope.ok(
-            results, query=args.query, total=len(results), latency_ms=latency_ms,
+            results,
+            query=args.query,
+            project=args.project,
+            match=args.match,
+            regex=args.regex,
+            sort=args.sort,
+            total=len(results),
+            latency_ms=latency_ms,
         )
         print(envelope.to_json(env))
 
