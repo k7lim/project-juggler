@@ -427,6 +427,14 @@ def test_cli_no_command(capsys):
         assert e.code == 1
 
 
+def test_cli_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+
+    assert exc.value.code == 0
+    assert "pj 0.2.0" in capsys.readouterr().out
+
+
 # --- project_id ---
 
 def test_project_id_deterministic():

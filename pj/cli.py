@@ -4,6 +4,7 @@ import argparse
 import sys
 import time
 
+from . import __version__
 from . import annotate, discover, envelope, pretty, resume, schedule
 from . import search as search_mod
 from .session_store import get_store
@@ -113,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pj",
         description="Project Juggler — scheduler for human attention",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     ls = sub.add_parser("list", help="List projects with derived state")
