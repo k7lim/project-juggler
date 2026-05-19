@@ -12,6 +12,7 @@ from .session_store import get_store
 SEARCH_HELP = """\
 Search examples:
   pj search sport --pretty
+  pj search --here sport --pretty
   pj search football soccer --pretty
   pj search football soccer --match all --project epic-odds --pretty
   pj search 'foot(ball)?|soccer' --regex --project epic-odds --pretty
@@ -22,6 +23,7 @@ Query strategy:
   Separate words are separate terms. Use this for exploratory agent searches.
   A quoted multi-word query is an exact substring phrase and can miss related sessions.
   Use --project to search within one project before broadening.
+  Use --here to infer --project from the current working directory.
   Use --match all when every term must appear; default is --match any.
   Use --regex for alternatives, stems, and spelling variants.
 """
@@ -190,6 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     srch.add_argument("--project", help="Restrict search to project name, path, or ID prefix")
     srch.add_argument(
+        "--here",
+        action="store_true",
+        help="Restrict search to the discovered project containing the current directory",
+    )
+    srch.add_argument(
         "--match",
         choices=["any", "all"],
         default="any",
@@ -338,12 +345,25 @@ def _cmd_search(args: argparse.Namespace) -> None:
         _missing_arg("search")
 
     start = time.monotonic()
+    project_filter = args.project
+    if args.here:
+        if args.project:
+            env = envelope.err("Use either --project or --here, not both", source="search")
+            print(envelope.to_json(env))
+            sys.exit(1)
+        current_project = discover.resolve_project_for_cwd()
+        if current_project is None:
+            env = envelope.err("Current directory is not inside a discovered project", source="search")
+            print(envelope.to_json(env))
+            sys.exit(1)
+        project_filter = current_project["path"]
+
     try:
         results = search_mod.search(
             args.query,
             limit=args.limit,
             sort=args.sort,
-            project=args.project,
+            project=project_filter,
             match=args.match,
             regex=args.regex,
         )
@@ -359,7 +379,8 @@ def _cmd_search(args: argparse.Namespace) -> None:
         env = envelope.ok(
             results,
             query=args.query,
-            project=args.project,
+            project=project_filter,
+            here=args.here,
             match=args.match,
             regex=args.regex,
             sort=args.sort,

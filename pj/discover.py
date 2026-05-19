@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from . import cache, state
@@ -121,6 +122,27 @@ def resolve_project(query: str) -> dict | None:
             return matches[0]
 
     return None
+
+
+def resolve_project_for_cwd(cwd: str | None = None) -> dict | None:
+    """Find the discovered project containing cwd, preferring the deepest path."""
+    current = os.path.realpath(cwd or os.getcwd())
+    all_projects, _ = discover(limit=9999)
+    matches = []
+    for p in all_projects:
+        path = p.get("path")
+        if not path:
+            continue
+        project_path = os.path.realpath(path)
+        try:
+            if os.path.commonpath([current, project_path]) == project_path:
+                matches.append((len(project_path), p))
+        except ValueError:
+            continue
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
 
 
 def discover(

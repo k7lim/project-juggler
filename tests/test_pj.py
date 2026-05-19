@@ -1036,6 +1036,42 @@ def test_cli_search_help_teaches_query_strategy(capsys):
     assert "quoted multi-word query is an exact substring phrase" in out
 
 
+def test_cli_search_here_uses_current_project(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/here-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/here-proj/subdir"), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
+        cli.main(["search", "--here", "here-proj"])
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["meta"]["project"] == "/tmp/here-proj"
+    assert parsed["data"][0]["name"] == "here-proj"
+
+
+def test_cli_search_here_outside_project_errors(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/here-proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/elsewhere"), \
+         pytest.raises(SystemExit) as exc:
+        cli.main(["search", "--here", "anything"])
+
+    assert exc.value.code == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert "not inside a discovered project" in parsed["meta"]["error"]
+
+
 # --- discover latest_note ---
 
 def test_discover_includes_latest_note():
@@ -1211,6 +1247,28 @@ def test_resolve_project_no_match():
     mocks = _mock_discover_with(fake)
     with mocks[0], mocks[1], mocks[2], mocks[3]:
         result = discover.resolve_project("zzz_nonexistent")
+    assert result is None
+
+
+def test_resolve_project_for_cwd_prefers_deepest_match():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [
+        {"path": "/home/user/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+        {"path": "/home/user/proj/packages/api", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+    ]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project_for_cwd("/home/user/proj/packages/api/src")
+    assert result is not None
+    assert result["path"] == "/home/user/proj/packages/api"
+
+
+def test_resolve_project_for_cwd_outside_projects():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/home/user/proj", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    mocks = _mock_discover_with(fake)
+    with mocks[0], mocks[1], mocks[2], mocks[3]:
+        result = discover.resolve_project_for_cwd("/home/user/elsewhere")
     assert result is None
 
 
