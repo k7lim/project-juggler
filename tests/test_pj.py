@@ -1117,7 +1117,7 @@ def test_resume_command_claude():
 
 def test_resume_command_codex():
     cmd = resume.resume_command("codex", "sess-456")
-    assert cmd == "codex --resume sess-456"
+    assert cmd == "codex resume sess-456"
 
 
 def test_resume_command_unknown_agent():
@@ -1345,7 +1345,7 @@ def test_cli_resume(capsys):
         cli.main(["resume", "resume-test"])
 
     out = capsys.readouterr().out.strip()
-    assert out == "cd /tmp/resume-test && codex --resume sess-abc"
+    assert out == "cd /tmp/resume-test && codex resume sess-abc"
 
 
 def test_cli_resume_not_found(capsys):
@@ -1605,7 +1605,7 @@ def test_resume_command_int_session_id():
 
 def test_resume_command_large_int_session_id():
     cmd = resume.resume_command("codex", 999999)
-    assert "--resume 999999" in cmd
+    assert cmd == "codex resume 999999"
 
 
 def test_full_resume_command_int_session_id():

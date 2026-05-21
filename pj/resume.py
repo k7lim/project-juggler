@@ -7,7 +7,7 @@ import shlex
 AGENT_RESUME_TEMPLATES: dict[str, str] = {
     "claude": "claude --resume {session_id}",
     "claude_code": "claude --resume {session_id}",
-    "codex": "codex --resume {session_id}",
+    "codex": "codex resume {session_id}",
     "opencode": "opencode --resume {session_id}",
     "amp": "amp --resume {session_id}",
     "hermes": "hermes --resume {session_id}",
@@ -30,5 +30,5 @@ def resume_command(agent: str, session_id: str) -> str:
 
 
 def full_resume_command(path: str, agent: str, session_id: str) -> str:
-    """Build 'cd DIR && <agent> --resume ID' for shell use."""
+    """Build 'cd DIR && <agent-specific resume command>' for shell use."""
     return f"cd {shlex.quote(path)} && {resume_command(agent, session_id)}"

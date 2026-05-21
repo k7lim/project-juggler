@@ -68,7 +68,7 @@ Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|olde
     "resume": """\
 Usage: pj resume <project>
 
-  Output cd + agent --resume command for the most recent session.
+  Output cd + agent-specific resume command for the most recent session.
   <project> is a name, path, or ID prefix from `pj list`.
 
   Examples:
@@ -173,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--pretty", action="store_true", help="Human-readable output")
     show.add_argument("--sessions", type=int, default=10, help="Max sessions to show (default: 10)")
 
-    res = sub.add_parser("resume", help="Output cd + agent --resume for most recent session")
+    res = sub.add_parser("resume", help="Output cd + agent-specific resume command for most recent session")
     res.add_argument("project", nargs="?", help="Project name, path, or ID prefix")
 
     srch = sub.add_parser(

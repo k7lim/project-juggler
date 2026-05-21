@@ -140,7 +140,7 @@ Shows project metadata, recent sessions with models and durations, and a resume 
 eval $(pj resume myproject)
 ```
 
-Outputs `cd <path> && <agent> --resume <session_id>` for the most recent session.
+Outputs `cd <path> && <agent-specific resume command>` for the most recent session.
 
 ### Annotations
 
@@ -192,7 +192,7 @@ Session parsing is implemented for Claude Code and Codex. Resume commands are te
 | Agent | Resume command |
 |-------|---------------|
 | Claude Code | `claude --resume <id>` |
-| Codex | `codex --resume <id>` |
+| Codex | `codex resume <id>` |
 | AMP | `amp --resume <id>` |
 | Aider | `aider --resume <id>` |
 | Cursor | `cursor --resume <id>` |
