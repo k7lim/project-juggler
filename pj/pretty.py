@@ -134,6 +134,10 @@ def _relative_time(iso: str | None) -> str:
         return "unknown"
 
 
+def _session_activity_time(session: dict) -> str | None:
+    return session.get("ended_at") or session.get("started_at")
+
+
 def print_chat(data: dict) -> None:
     """Render a full session conversation as markdown-style output."""
     title = data.get("title") or "(untitled)"
@@ -214,7 +218,7 @@ def print_status(data: dict) -> None:
         for s in sessions:
             agent = s.get("agent", "?")
             title = s.get("title") or "(untitled)"
-            when = _relative_time(s.get("started_at"))
+            when = _relative_time(_session_activity_time(s))
             sid = str(s.get("session_id", ""))[:12]
             model = s.get("model") or ""
             model_tag = f" {_c('36', model)}" if model else ""
@@ -398,7 +402,7 @@ def print_search(results: list[dict], query: str | list[str]) -> None:
         if sessions:
             for s in sessions[:3]:
                 title = (s.get("title") or "(untitled)").replace("\n", " ")[:80]
-                when = _relative_time(s.get("started_at"))
+                when = _relative_time(_session_activity_time(s))
                 sid = str(s.get("session_id", ""))[:12]
                 agent = s.get("agent", "")
                 cmd = resume_mod.full_resume_command(path, agent, s.get("session_id", ""))

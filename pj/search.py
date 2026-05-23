@@ -229,6 +229,7 @@ def _scan_sessions(
                 "agent": summary.get("agent", ""),
                 "title": title,
                 "started_at": summary.get("started_at"),
+                "ended_at": summary.get("ended_at"),
                 "match_count": title_count,
             })
 
@@ -243,6 +244,7 @@ def _scan_sessions(
                 "snippet": snippet,
                 "role": "",
                 "started_at": summary.get("started_at"),
+                "ended_at": summary.get("ended_at"),
                 "match_type": "scan",
                 "match_count": content_count,
             })
@@ -266,6 +268,7 @@ def _merge_session_hits(
             "agent": s.get("agent", ""),
             "title": s.get("title") or "",
             "started_at": s.get("started_at"),
+            "ended_at": s.get("ended_at"),
             "match_type": "title",
             "match_count": s.get("match_count") or 0,
         })
@@ -308,6 +311,7 @@ def _merge_content_hits(
             "agent": hit.get("agent", ""),
             "title": hit.get("title") or "",
             "started_at": hit.get("started_at"),
+            "ended_at": hit.get("ended_at"),
             "snippet": snippet,
             "match_type": "content",
             "match_count": match_count,
@@ -360,14 +364,17 @@ def _dedupe_matching_sessions(matches: list[dict]) -> None:
 
 def _sort_hits(hits: list[dict], sort: str) -> list[dict]:
     if sort == "oldest":
-        return sorted(hits, key=lambda h: h.get("started_at") or "")
+        return sorted(hits, key=lambda h: h.get("ended_at") or h.get("started_at") or "")
     if sort == "relevance":
         return sorted(
             hits,
-            key=lambda h: (h.get("match_count") or 0, h.get("started_at") or ""),
+            key=lambda h: (
+                h.get("match_count") or 0,
+                h.get("ended_at") or h.get("started_at") or "",
+            ),
             reverse=True,
         )
-    return sorted(hits, key=lambda h: h.get("started_at") or "", reverse=True)
+    return sorted(hits, key=lambda h: h.get("ended_at") or h.get("started_at") or "", reverse=True)
 
 
 def _sort_key(
@@ -426,7 +433,7 @@ def _oldest_match_ts(result: dict) -> float:
 def _match_timestamps(result: dict) -> list[float]:
     timestamps: list[float] = []
     for session in result.get("matching_sessions", []):
-        ts = _parse_iso(session.get("started_at"))
+        ts = _parse_iso(session.get("ended_at") or session.get("started_at"))
         if ts:
             timestamps.append(ts)
     ts = _parse_iso(result.get("last_active"))

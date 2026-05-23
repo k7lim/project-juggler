@@ -89,7 +89,7 @@ def list_projects(detail: bool = False) -> list[dict]:
     if detail:
         rows = _query_all(
             "SELECT w.path, COALESCE(a.slug, 'unknown'), COUNT(c.id), "
-            "       MAX(c.started_at), MIN(c.started_at), "
+            "       MAX(COALESCE(c.ended_at, c.started_at)), MIN(c.started_at), "
             "       SUM(CASE WHEN c.ended_at IS NOT NULL AND c.started_at IS NOT NULL "
             "           THEN (c.ended_at - c.started_at) / 1000.0 ELSE 0 END), "
             "       GROUP_CONCAT(DISTINCT c.primary_model) "
@@ -97,17 +97,17 @@ def list_projects(detail: bool = False) -> list[dict]:
             "JOIN workspaces w ON c.workspace_id = w.id "
             "LEFT JOIN agents a ON c.agent_id = a.id "
             "GROUP BY w.path, a.slug "
-            "ORDER BY MAX(c.started_at) DESC"
+            "ORDER BY MAX(COALESCE(c.ended_at, c.started_at)) DESC"
         )
     else:
         rows = _query_all(
             "SELECT w.path, COALESCE(a.slug, 'unknown'), COUNT(c.id), "
-            "       MAX(c.started_at), NULL, NULL, NULL "
+            "       MAX(COALESCE(c.ended_at, c.started_at)), NULL, NULL, NULL "
             "FROM conversations c "
             "JOIN workspaces w ON c.workspace_id = w.id "
             "LEFT JOIN agents a ON c.agent_id = a.id "
             "GROUP BY w.path, a.slug "
-            "ORDER BY MAX(c.started_at) DESC"
+            "ORDER BY MAX(COALESCE(c.ended_at, c.started_at)) DESC"
         )
 
     grouped: dict[str, dict] = {}
@@ -181,7 +181,7 @@ def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
         "JOIN workspaces w ON c.workspace_id = w.id "
         "LEFT JOIN agents a ON c.agent_id = a.id "
         "WHERE w.path = ? "
-        "ORDER BY c.started_at DESC "
+        "ORDER BY COALESCE(c.ended_at, c.started_at) DESC "
         "LIMIT ?",
         (workspace_path, limit),
     )
@@ -201,6 +201,8 @@ def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
             "agent": agent,
             "title": title,
             "started_at": iso,
+            "ended_at": datetime.fromtimestamp(ended_at_ms / 1000, tz=timezone.utc).isoformat()
+            if ended_at_ms else None,
             "model": model,
             "duration_secs": duration_secs,
             "input_tokens": input_tok,
@@ -214,7 +216,7 @@ def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
             "api_calls": api_calls,
         })
     # Re-sort across DBs and apply limit
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
     return results[:limit]
 
 
@@ -255,40 +257,44 @@ def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[d
     """Search session titles for substring matches."""
     order = "ASC" if sort == "oldest" else "DESC"
     rows = _query_all(
-        "SELECT c.id, w.path, COALESCE(a.slug, 'unknown'), c.title, c.started_at "
+        "SELECT c.id, w.path, COALESCE(a.slug, 'unknown'), c.title, c.started_at, c.ended_at "
         "FROM conversations c "
         "JOIN workspaces w ON c.workspace_id = w.id "
         "LEFT JOIN agents a ON c.agent_id = a.id "
         "WHERE c.title LIKE ? "
-        f"ORDER BY c.started_at {order} "
+        f"ORDER BY COALESCE(c.ended_at, c.started_at) {order} "
         "LIMIT ?",
         (f"%{query}%", limit),
     )
 
     results = []
-    for session_id, path, agent, title, started_at_ms in rows:
+    for session_id, path, agent, title, started_at_ms, ended_at_ms in rows:
         iso = None
         if started_at_ms:
             iso = datetime.fromtimestamp(started_at_ms / 1000, tz=timezone.utc).isoformat()
+        ended_iso = None
+        if ended_at_ms:
+            ended_iso = datetime.fromtimestamp(ended_at_ms / 1000, tz=timezone.utc).isoformat()
         results.append({
             "session_id": session_id,
             "path": path,
             "agent": agent,
             "title": title,
             "started_at": iso,
+            "ended_at": ended_iso,
         })
     if sort == "oldest":
-        results.sort(key=lambda r: r["started_at"] or "")
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "")
     elif sort == "relevance":
         results.sort(
             key=lambda r: (
                 _count_occurrences(r.get("title") or "", query),
-                r["started_at"] or "",
+                r.get("ended_at") or r.get("started_at") or "",
             ),
             reverse=True,
         )
     else:
-        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
     return results[:limit]
 
 
@@ -311,7 +317,8 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
 
     Returns list of:
         {"path": str, "session_id": int, "agent": str, "snippet": str,
-         "started_at": str|None, "title": str|None, "match_type": "fts"|"like"}
+         "started_at": str|None, "ended_at": str|None, "title": str|None,
+         "match_type": "fts"|"like"}
     """
     results: list[dict] = []
     seen: set[tuple] = set()  # (db_path, message_id) dedup
@@ -331,7 +338,7 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
         try:
             hits = conn.execute(
                 "SELECT m.id, m.conversation_id, m.content, m.role, "
-                "       c.title, c.started_at, w.path, COALESCE(a.slug, 'unknown') "
+                "       c.title, c.started_at, c.ended_at, w.path, COALESCE(a.slug, 'unknown') "
                 "FROM fts_messages f "
                 "JOIN messages m ON f.rowid = m.id "
                 "JOIN conversations c ON m.conversation_id = c.id "
@@ -351,13 +358,13 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
             try:
                 hits = conn.execute(
                     "SELECT m.id, m.conversation_id, m.content, m.role, "
-                    "       c.title, c.started_at, w.path, COALESCE(a.slug, 'unknown') "
+                    "       c.title, c.started_at, c.ended_at, w.path, COALESCE(a.slug, 'unknown') "
                     "FROM messages m "
                     "JOIN conversations c ON m.conversation_id = c.id "
                     "JOIN workspaces w ON c.workspace_id = w.id "
                     "LEFT JOIN agents a ON c.agent_id = a.id "
                     "WHERE m.content LIKE ? "
-                    f"ORDER BY c.started_at {time_order} "
+                    f"ORDER BY COALESCE(c.ended_at, c.started_at) {time_order} "
                     "LIMIT ?",
                     (f"%{query}%", limit * 2),
                 ).fetchall()
@@ -367,7 +374,7 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
 
         conn.close()
 
-        for msg_id, conv_id, content, role, title, started_at_ms, path, agent in hits:
+        for msg_id, conv_id, content, role, title, started_at_ms, ended_at_ms, path, agent in hits:
             key = (str(db), msg_id)
             if key in seen:
                 continue
@@ -377,6 +384,9 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
             iso = None
             if started_at_ms:
                 iso = datetime.fromtimestamp(started_at_ms / 1000, tz=timezone.utc).isoformat()
+            ended_iso = None
+            if ended_at_ms:
+                ended_iso = datetime.fromtimestamp(ended_at_ms / 1000, tz=timezone.utc).isoformat()
 
             results.append({
                 "path": path,
@@ -386,19 +396,23 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
                 "snippet": snippet,
                 "role": role,
                 "started_at": iso,
+                "ended_at": ended_iso,
                 "match_type": match_type,
                 "match_count": _count_occurrences(content or "", query),
             })
 
     if sort == "oldest":
-        results.sort(key=lambda r: r["started_at"] or "")
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "")
     elif sort == "relevance":
         results.sort(
-            key=lambda r: (r.get("match_count") or 0, r["started_at"] or ""),
+            key=lambda r: (
+                r.get("match_count") or 0,
+                r.get("ended_at") or r.get("started_at") or "",
+            ),
             reverse=True,
         )
     else:
-        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
 
     # Keep only the best hit per session (first = most recent message)
     seen_sessions: set[tuple] = set()

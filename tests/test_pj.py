@@ -348,6 +348,49 @@ def test_fs_store_search_content_applies_limit_after_recency_sort():
     assert results[0]["path"] == "/tmp/new"
 
 
+def test_fs_store_search_content_recency_uses_session_activity():
+    """A resumed older session should sort by its last activity, not creation time."""
+
+    class FakeParser:
+        agent_slug = "fake"
+
+        def list_sessions(self, root: str) -> list[str]:
+            return ["old-start-new-activity", "new-start-old-activity"]
+
+        def _session(self, path: str) -> NormalizedSession:
+            started_at = 1000 if path == "old-start-new-activity" else 2000
+            ended_at = 4000 if path == "old-start-new-activity" else 2500
+            return NormalizedSession(
+                session_id=path,
+                agent=self.agent_slug,
+                source_path=path,
+                workspace=f"/tmp/{path}",
+                title=path,
+                started_at=started_at,
+                ended_at=ended_at,
+                messages=[
+                    NormalizedMessage(
+                        idx=0,
+                        role="user",
+                        content=f"{path} sports discussion",
+                    )
+                ],
+            )
+
+        def parse_metadata(self, path: str) -> NormalizedSession:
+            return self._session(path)
+
+        def parse_session(self, path: str) -> NormalizedSession:
+            return self._session(path)
+
+    with mock.patch.object(fs_store, "_configured_roots", return_value=[("/tmp/root", FakeParser())]):
+        results = fs_store.search_content("sport", limit=1)
+
+    assert len(results) == 1
+    assert results[0]["path"] == "/tmp/old-start-new-activity"
+    assert results[0]["ended_at"] is not None
+
+
 # --- pretty ---
 
 def test_pretty_no_projects(capsys):
@@ -954,6 +997,30 @@ def test_pretty_search_with_results(capsys):
     out = capsys.readouterr().out
     assert "api-gateway" in out
     assert 'Search: "api"' in out
+
+
+def test_pretty_search_session_age_uses_ended_at(capsys):
+    started = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    ended = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    results = [{
+        "name": "api-gateway",
+        "state": "active",
+        "path": "/tmp/api-gateway",
+        "match_fields": ["content"],
+        "matching_sessions": [{
+            "session_id": "session-123456",
+            "agent": "codex",
+            "title": "api search result",
+            "started_at": started,
+            "ended_at": ended,
+        }],
+    }]
+
+    pretty.print_search(results, "api")
+    out = capsys.readouterr().out
+
+    assert "2m ago" in out
+    assert "5d ago" not in out
 
 
 # --- cli next/search ---
@@ -1966,6 +2033,11 @@ def test_search_content_like_fallback():
                 (2, "c1", 1, "assistant", None, now_ms, "I'll help with health data analysis"),
             ],
         )
+        later_ms = now_ms + 3600000
+        conn = sqlite3.connect(str(db))
+        conn.execute("UPDATE conversations SET ended_at = ? WHERE id = 'c1'", (later_ms,))
+        conn.commit()
+        conn.close()
         with mock.patch.object(cass_facade, "db_paths", return_value=[db]):
             results = cass_facade.search_content("health")
 
@@ -1973,6 +2045,7 @@ def test_search_content_like_fallback():
     assert results[0]["path"] == "/proj/health-tracker"
     assert "health" in results[0]["snippet"].lower()
     assert results[0]["match_type"] == "like"
+    assert results[0]["ended_at"] is not None
 
 
 def test_search_content_across_multi_db():

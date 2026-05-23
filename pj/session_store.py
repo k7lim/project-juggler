@@ -49,7 +49,7 @@ class SessionStore(Protocol):
 
         Returns list of:
             {"session_id": str|int, "agent": str, "title": str|None,
-             "started_at": str|None, "model": str|None,
+             "started_at": str|None, "ended_at": str|None, "model": str|None,
              "duration_secs": float|None,
              "input_tokens": int|None, "output_tokens": int|None,
              "cache_read_tokens": int|None, "cache_creation_tokens": int|None,
@@ -76,7 +76,7 @@ class SessionStore(Protocol):
 
         Returns list of:
             {"session_id": str|int, "path": str, "agent": str,
-             "title": str|None, "started_at": str|None}
+             "title": str|None, "started_at": str|None, "ended_at": str|None}
         """
         ...
 
@@ -90,8 +90,8 @@ class SessionStore(Protocol):
 
         Returns list of:
             {"path": str, "session_id": str|int, "agent": str,
-             "snippet": str, "started_at": str|None, "title": str|None,
-             "match_type": str}
+             "snippet": str, "started_at": str|None, "ended_at": str|None,
+             "title": str|None, "match_type": str}
         """
         ...
 

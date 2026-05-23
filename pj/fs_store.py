@@ -89,13 +89,15 @@ def _group_by_workspace(
         if s.agent not in g["agents"]:
             g["agents"].append(s.agent)
         g["session_count"] += 1
-        if s.started_at:
-            iso = datetime.fromtimestamp(s.started_at / 1000, tz=timezone.utc).isoformat()
+        active_at = s.ended_at or s.started_at
+        if active_at:
+            iso = _iso_from_ms(active_at)
             if g["last_active"] is None or iso > g["last_active"]:
                 g["last_active"] = iso
             if detail:
-                if g["first_active"] is None or iso < g["first_active"]:
-                    g["first_active"] = iso
+                first_iso = _iso_from_ms(s.started_at or active_at)
+                if g["first_active"] is None or first_iso < g["first_active"]:
+                    g["first_active"] = first_iso
         if detail:
             if s.started_at and s.ended_at:
                 g["total_duration_secs"] += (s.ended_at - s.started_at) / 1000.0
@@ -178,6 +180,14 @@ def recent_session_counts(days: int = 7) -> dict[str, int]:
     return counts
 
 
+def _iso_from_ms(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _activity_ms(session: base.NormalizedSession) -> int:
+    return session.ended_at or session.started_at or 0
+
+
 def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
     results = []
     for root, parser in _configured_roots():
@@ -188,14 +198,14 @@ def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
             duration_secs = None
             if meta.started_at and meta.ended_at:
                 duration_secs = (meta.ended_at - meta.started_at) / 1000.0
-            iso = None
-            if meta.started_at:
-                iso = datetime.fromtimestamp(meta.started_at / 1000, tz=timezone.utc).isoformat()
+            iso = _iso_from_ms(meta.started_at) if meta.started_at else None
+            ended_iso = _iso_from_ms(meta.ended_at) if meta.ended_at else None
             results.append({
                 "session_id": meta.session_id,
                 "agent": meta.agent,
                 "title": meta.title,
                 "started_at": iso,
+                "ended_at": ended_iso,
                 "model": meta.model,
                 "duration_secs": duration_secs,
                 "input_tokens": None,
@@ -208,7 +218,7 @@ def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
                 "tool_calls": None,
                 "api_calls": None,
             })
-    results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
     return results[:limit]
 
 
@@ -227,29 +237,29 @@ def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[d
             if not meta or not meta.title:
                 continue
             if query_lower in meta.title.lower():
-                iso = None
-                if meta.started_at:
-                    iso = datetime.fromtimestamp(meta.started_at / 1000, tz=timezone.utc).isoformat()
+                iso = _iso_from_ms(meta.started_at) if meta.started_at else None
+                ended_iso = _iso_from_ms(meta.ended_at) if meta.ended_at else None
                 results.append({
                     "session_id": meta.session_id,
                     "path": meta.workspace or "",
                     "agent": meta.agent,
                     "title": meta.title,
                     "started_at": iso,
+                    "ended_at": ended_iso,
                 })
 
     if sort == "oldest":
-        results.sort(key=lambda r: r["started_at"] or "")
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "")
     elif sort == "relevance":
         results.sort(
             key=lambda r: (
                 _count_occurrences(r.get("title") or "", query),
-                r["started_at"] or "",
+                r.get("ended_at") or r.get("started_at") or "",
             ),
             reverse=True,
         )
     else:
-        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
     return results[:limit]
 
 
@@ -262,8 +272,7 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
     for root, parser in _configured_roots():
         for path in parser.list_sessions(root):
             meta = parser.parse_metadata(path)
-            started_at = meta.started_at if meta and meta.started_at else 0
-            candidates.append((started_at, path, parser))
+            candidates.append((_activity_ms(meta) if meta else 0, path, parser))
 
     candidates.sort(key=lambda c: c[0], reverse=(sort != "oldest"))
 
@@ -292,11 +301,8 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
                 continue
             seen_sessions.add(key)
 
-            iso = None
-            if session.started_at:
-                iso = datetime.fromtimestamp(
-                    session.started_at / 1000, tz=timezone.utc
-                ).isoformat()
+            iso = _iso_from_ms(session.started_at) if session.started_at else None
+            ended_iso = _iso_from_ms(session.ended_at) if session.ended_at else None
 
             results.append({
                 "path": session.workspace or "",
@@ -306,6 +312,7 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
                 "snippet": first_snippet,
                 "role": first_role,
                 "started_at": iso,
+                "ended_at": ended_iso,
                 "match_type": "grep",
                 "match_count": match_count,
             })
@@ -314,14 +321,17 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
             break
 
     if sort == "oldest":
-        results.sort(key=lambda r: r["started_at"] or "")
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "")
     elif sort == "relevance":
         results.sort(
-            key=lambda r: (r.get("match_count") or 0, r["started_at"] or ""),
+            key=lambda r: (
+                r.get("match_count") or 0,
+                r.get("ended_at") or r.get("started_at") or "",
+            ),
             reverse=True,
         )
     else:
-        results.sort(key=lambda r: r["started_at"] or "", reverse=True)
+        results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
     return results[:limit]
 
 
