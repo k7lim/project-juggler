@@ -3,6 +3,7 @@ from __future__ import annotations
 """Local stdlib HTTP server for the live census dashboard."""
 
 import json
+import os
 import sys
 import threading
 import time
@@ -355,12 +356,32 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
                 self._send_text(HTML, "text/html; charset=utf-8")
                 return
 
+            if parsed.path == "/api/health":
+                body = envelope.to_json(envelope.ok({"status": "running"}))
+                self._send_text(body, "application/json; charset=utf-8")
+                return
+
             if parsed.path == "/api/census":
                 params = parse_qs(parsed.query)
                 force = params.get("refresh", ["0"])[0] in ("1", "true", "yes")
                 snapshot = census_cache.get(force=force)
                 body = envelope.to_json(envelope.ok(snapshot["rows"], **snapshot["meta"]))
                 self._send_text(body, "application/json; charset=utf-8")
+                return
+
+            self.send_error(404)
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/control/stop":
+                token = os.environ.get("PJ_CENSUS_CONTROL_TOKEN")
+                supplied = self.headers.get("X-PJ-Control-Token")
+                if not token or supplied != token:
+                    self.send_error(403)
+                    return
+                body = envelope.to_json(envelope.ok({"status": "stopping"}))
+                self._send_text(body, "application/json; charset=utf-8")
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
             self.send_error(404)

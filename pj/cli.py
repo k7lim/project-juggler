@@ -225,7 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--last", type=int, default=None, help="Show only last N messages")
 
     census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
-    census_p.add_argument("census_action", nargs="?", choices=["serve"], help="Start the live dashboard server")
+    census_p.add_argument(
+        "census_action",
+        nargs="?",
+        choices=["serve", "start", "status", "stop"],
+        help="serve in foreground, start in background, inspect status, or stop the server",
+    )
     census_p.add_argument("--limit", type=int, default=10000, help="Max projects (default: 10000)")
     census_p.add_argument("--host", default="127.0.0.1", help="Serve host (default: 127.0.0.1)")
     census_p.add_argument("--port", type=int, default=8765, help="Serve port (default: 8765)")
@@ -446,6 +451,46 @@ def _cmd_census(args: argparse.Namespace) -> None:
             limit=args.limit,
             check_interval=args.check_interval,
         )
+        return
+
+    if args.census_action in ("start", "status", "stop"):
+        from . import census_process
+
+        if args.census_action == "start":
+            result = census_process.start(
+                host=args.host,
+                port=args.port,
+                limit=args.limit,
+                check_interval=args.check_interval,
+            )
+            if not result.get("running"):
+                print(
+                    envelope.to_json(
+                        {
+                            "success": False,
+                            "data": result,
+                            "meta": {"error": "census server did not become healthy"},
+                        }
+                    )
+                )
+                sys.exit(1)
+        elif args.census_action == "stop":
+            result = census_process.stop()
+            if result.get("running") and not result.get("stopped"):
+                print(
+                    envelope.to_json(
+                        {
+                            "success": False,
+                            "data": result,
+                            "meta": {"error": "census server did not stop"},
+                        }
+                    )
+                )
+                sys.exit(1)
+        else:
+            result = census_process.status()
+
+        print(envelope.to_json(envelope.ok(result)))
         return
 
     from . import census

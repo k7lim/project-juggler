@@ -44,6 +44,11 @@ pj show myproject --pretty
 # Search across all sessions
 pj search "authentication" --pretty
 
+# Run the census dashboard in the background
+pj census start
+pj census status
+pj census stop
+
 # Resume a specific session from search results
 # (copy the command from search output)
 cd /path/to/project && claude --resume abc123
@@ -123,6 +128,23 @@ pj next --pretty
 2    0.71   refactor-auth                 stale     medium  needs attention soon
 3    0.45   old-dashboard                 dormant   none    baseline score
 ```
+
+### `pj census` - Project dashboard
+
+Generate the project census as JSON, run the live dashboard in the foreground,
+or manage it as a background process:
+
+```bash
+pj census                    # JSON census snapshot
+pj census serve              # Foreground web server
+pj census start              # Background web server
+pj census status             # JSON status: pid, URL, health, state/log files
+pj census stop               # Graceful shutdown via local control endpoint
+```
+
+`pj census start/status/stop` are designed for both humans and agents: output is
+structured JSON, the server metadata is stored under `PJ_DATA_DIR`, and `stop`
+uses a per-process local control token instead of parsing logs or guessing ports.
 
 ### `pj show` - Deep dive into a project
 

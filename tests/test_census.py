@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from pj import census, cli
+from pj import census, census_process, cli
 from pj.census_server import CensusCache
 
 
@@ -135,3 +135,114 @@ def test_cli_census_outputs_dashboard_json(capsys):
     assert parsed["success"] is True
     assert parsed["data"] == snap["rows"]
     assert parsed["meta"]["total"] == 1
+
+
+def test_census_process_status_reports_running_without_control_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+    census_process.state_path().write_text(
+        json.dumps(
+            {
+                "pid": 12345,
+                "host": "127.0.0.1",
+                "port": 8765,
+                "url": "http://127.0.0.1:8765/",
+                "limit": 50,
+                "check_interval": 10,
+                "control_token": "secret-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with mock.patch("pj.census_process._is_process_alive", return_value=True), \
+         mock.patch(
+             "pj.census_process._request_json",
+             return_value={"success": True, "data": {"status": "running"}, "meta": {}},
+         ):
+        status = census_process.status()
+
+    assert status["running"] is True
+    assert status["status"] == "running"
+    assert status["url"] == "http://127.0.0.1:8765/"
+    assert "control_token" not in status
+
+
+def test_census_process_liveness_treats_zombie_as_stopped():
+    result = mock.Mock(returncode=0, stdout="Zs\n")
+
+    with mock.patch("pj.census_process.os.kill"), \
+         mock.patch("pj.census_process.subprocess.run", return_value=result):
+        assert census_process._is_process_alive(12345) is False
+
+
+def test_census_process_start_launches_background_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+    process = mock.Mock(pid=4321)
+    process.poll.return_value = None
+
+    with mock.patch("pj.census_process.subprocess.Popen", return_value=process) as popen, \
+         mock.patch("pj.census_process._is_process_alive", return_value=True), \
+         mock.patch(
+             "pj.census_process._request_json",
+             return_value={"success": True, "data": {"status": "running"}, "meta": {}},
+         ):
+        result = census_process.start(host="127.0.0.1", port=9876, limit=5, check_interval=3)
+
+    assert result["running"] is True
+    assert result["started"] is True
+    assert result["url"] == "http://127.0.0.1:9876/"
+    assert "control_token" not in result
+    stored = json.loads(census_process.state_path().read_text(encoding="utf-8"))
+    assert stored["pid"] == 4321
+    assert stored["control_token"]
+    popen.assert_called_once()
+
+
+def test_census_process_stop_reports_final_stopped_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+    census_process.state_path().write_text(
+        json.dumps(
+            {
+                "pid": 12345,
+                "host": "127.0.0.1",
+                "port": 8765,
+                "url": "http://127.0.0.1:8765/",
+                "control_token": "secret-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with mock.patch("pj.census_process._is_process_alive", side_effect=[True, False]), \
+         mock.patch(
+             "pj.census_process._request_json",
+             return_value={"success": True, "data": {"status": "running"}, "meta": {}},
+         ), \
+         mock.patch(
+             "pj.census_process._post_json",
+             return_value={"success": True, "data": {"status": "stopping"}, "meta": {}},
+         ):
+        result = census_process.stop()
+
+    assert result["stopped"] is True
+    assert result["running"] is False
+    assert result["pid_alive"] is False
+    assert result["health_ok"] is False
+    assert "health" not in result
+    assert not census_process.state_path().exists()
+
+
+def test_cli_census_status_outputs_structured_json(capsys):
+    status = {
+        "status": "running",
+        "running": True,
+        "pid": 12345,
+        "url": "http://127.0.0.1:8765/",
+    }
+
+    with mock.patch("pj.census_process.status", return_value=status):
+        cli.main(["census", "status"])
+
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"] == status
