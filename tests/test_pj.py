@@ -988,6 +988,20 @@ def test_pretty_search_no_results_suggests_split_terms(capsys):
     assert "pj search sports broadcast fan excitement --pretty" in out
 
 
+def test_pretty_search_no_results_suggests_regex_flag(capsys):
+    pretty.print_search([], r"foot(ball)?|soccer")
+    out = capsys.readouterr().out
+    assert "regex metacharacters" in out
+    assert "pj search 'foot(ball)?|soccer' --regex --pretty" in out
+
+
+def test_pretty_search_no_results_does_not_suggest_regex_when_enabled(capsys):
+    pretty.print_search([], r"foot(ball)?|soccer", regex=True)
+    out = capsys.readouterr().out
+    assert "No results" in out
+    assert "--regex" not in out
+
+
 def test_pretty_search_with_results(capsys):
     results = [{
         "name": "api-gateway", "state": "active",
@@ -1076,6 +1090,23 @@ def test_cli_search_json(capsys):
     assert "name" in parsed["data"][0]["match_fields"]
 
 
+def test_cli_search_json_suggests_regex_flag_for_regex_like_no_results(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/search-test", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=[]):
+        cli.main(["search", r"foot(ball)?|soccer"])
+
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"] == []
+    assert parsed["meta"]["hint"] == "Query contains regex metacharacters. Try: pj search 'foot(ball)?|soccer' --regex"
+
+
 def test_cli_search_pretty(capsys):
     now_iso = datetime.now(timezone.utc).isoformat()
     fake = [{"path": "/tmp/search-pretty", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
@@ -1101,6 +1132,16 @@ def test_cli_search_help_teaches_query_strategy(capsys):
     assert "--project" in out
     assert "Query strategy" in out
     assert "quoted multi-word query is an exact substring phrase" in out
+
+
+def test_cli_search_missing_arg_usage_mentions_regex(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["search"])
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "[--regex]" in err
+    assert "Use --regex" in err
 
 
 def test_cli_search_here_uses_current_project(capsys):

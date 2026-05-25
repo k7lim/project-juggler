@@ -59,7 +59,7 @@ Usage: pj chat <session_id> [--pretty] [--no-tools] [--roles ROLES] [--last N]
   Journey: pj list → pj show <project> → pj chat <session_id>""",
 
     "search": """\
-Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|oldest]
+Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|oldest] [--regex]
 
   Search projects and session content by keyword.
 
@@ -378,8 +378,12 @@ def _cmd_search(args: argparse.Namespace) -> None:
         sys.exit(1)
     latency_ms = int((time.monotonic() - start) * 1000)
 
+    hint = None
+    if not results and not args.regex and search_mod.looks_like_regex(args.query):
+        hint = search_mod.regex_hint(args.query)
+
     if args.pretty:
-        pretty.print_search(results, args.query)
+        pretty.print_search(results, args.query, regex=args.regex)
     else:
         env = envelope.ok(
             results,
@@ -391,6 +395,7 @@ def _cmd_search(args: argparse.Namespace) -> None:
             sort=args.sort,
             total=len(results),
             latency_ms=latency_ms,
+            **({"hint": hint} if hint else {}),
         )
         print(envelope.to_json(env))
 

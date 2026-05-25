@@ -363,12 +363,16 @@ def print_next(scored: list[dict]) -> None:
         print("  ".join(row))
 
 
-def print_search(results: list[dict], query: str | list[str]) -> None:
+def print_search(results: list[dict], query: str | list[str], regex: bool = False) -> None:
     from . import resume as resume_mod
+    from . import search as search_mod
 
     label = " ".join(query) if isinstance(query, list) else query
     if not results:
         print(f'No results for "{label}".')
+        if not regex and search_mod.looks_like_regex(query):
+            print(f"Hint: {search_mod.regex_hint(query)} --pretty")
+            return
         if isinstance(query, str) and " " in query.strip():
             terms = " ".join(query.split())
             print(f"Hint: quoted multi-word queries are exact phrases. Try: pj search {terms} --pretty")

@@ -8,6 +8,7 @@ indicating what matched.
 """
 
 import re
+import shlex
 from datetime import datetime, timezone
 from typing import Pattern
 
@@ -16,6 +17,7 @@ from .session_store import get_store
 
 SEARCH_SORTS = {"newest", "oldest", "relevance"}
 MATCH_MODES = {"any", "all"}
+_REGEX_META = re.compile(r"[\\.^$*+?{}\[\]()]|[|]")
 
 
 def search(
@@ -109,6 +111,17 @@ def _normalize_terms(query: str | list[str]) -> list[str]:
     if isinstance(query, str):
         return [query] if query else []
     return [q for q in query if q]
+
+
+def looks_like_regex(query: str | list[str]) -> bool:
+    """Return True when an unflagged query probably intended regex matching."""
+    return any(_REGEX_META.search(term) for term in _normalize_terms(query))
+
+
+def regex_hint(query: str | list[str]) -> str:
+    terms = _normalize_terms(query)
+    rendered = " ".join(shlex.quote(term) for term in terms)
+    return f"Query contains regex metacharacters. Try: pj search {rendered} --regex"
 
 
 def _compile_patterns(terms: list[str]) -> list[Pattern[str]]:
