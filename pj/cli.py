@@ -58,6 +58,18 @@ Usage: pj chat <session_id> [--pretty] [--no-tools] [--roles ROLES] [--last N]
 
   Journey: pj list → pj show <project> → pj chat <session_id>""",
 
+    "chats": """\
+Usage: pj chats [project] [--here] [--pretty] [--limit N]
+
+  List chats/sessions for a project. With no project, uses the current directory.
+
+  Examples:
+    pj chats --here --pretty
+    pj chats myproject --limit 50
+    pj chat list --here --pretty
+
+  Journey: pj chats --here → pj chat <session_id>""",
+
     "search": """\
 Usage: pj search <query...> [--pretty] [--limit N] [--sort newest|relevance|oldest] [--regex]
 
@@ -224,6 +236,16 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p.add_argument("--offset", type=int, default=0, help="Skip first N messages")
     chat_p.add_argument("--last", type=int, default=None, help="Show only last N messages")
 
+    chats_p = sub.add_parser("chats", help="List chats/sessions for a project")
+    chats_p.add_argument("project", nargs="?", help="Project name, path, or ID prefix")
+    chats_p.add_argument(
+        "--here",
+        action="store_true",
+        help="List chats for the discovered project containing the current directory",
+    )
+    chats_p.add_argument("--pretty", action="store_true", help="Human-readable output")
+    chats_p.add_argument("--limit", type=int, default=20, help="Max sessions to show (default: 20)")
+
     census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
     census_p.add_argument(
         "census_action",
@@ -242,6 +264,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _resolve_project_arg(project: str | None, *, here: bool = False, source: str = "project") -> dict:
+    if here and project:
+        env = envelope.err("Use either a project or --here, not both", source=source)
+        print(envelope.to_json(env))
+        sys.exit(1)
+
+    if here or not project:
+        current_project = discover.resolve_project_for_cwd()
+        if current_project is None:
+            env = envelope.err("Current directory is not inside a discovered project", source=source)
+            print(envelope.to_json(env))
+            sys.exit(1)
+        return current_project
+
+    resolved = discover.resolve_project(project)
+    if resolved is None:
+        env = envelope.err(f"No project matching {project!r}", source=source)
+        print(envelope.to_json(env))
+        sys.exit(1)
+    return resolved
+
+
+def _project_session_data(project: dict, limit: int) -> dict:
+    sessions = get_store().project_sessions(project["path"], limit=limit)
+    resume_cmd = None
+    if sessions:
+        latest = sessions[0]
+        resume_cmd = resume.full_resume_command(
+            project["path"], latest["agent"], latest["session_id"],
+        )
+        sids = [s["session_id"] for s in sessions]
+        details = get_store().session_details(sids)
+        for s in sessions:
+            d = details.get(s["session_id"], {})
+            s["versions"] = d.get("versions", [])
+            s["models"] = d.get("models", [])
+
+    return {
+        **project,
+        "sessions": sessions,
+        "resume_cmd": resume_cmd,
+    }
 
 
 def _cmd_list(args: argparse.Namespace) -> None:
@@ -293,32 +359,37 @@ def _cmd_show(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
         sys.exit(1)
 
-    sessions = get_store().project_sessions(project["path"], limit=args.sessions)
-    resume_cmd = None
-    if sessions:
-        latest = sessions[0]
-        resume_cmd = resume.full_resume_command(
-            project["path"], latest["agent"], latest["session_id"],
-        )
-        # Enrich sessions with harness version and per-message models
-        sids = [s["session_id"] for s in sessions]
-        details = get_store().session_details(sids)
-        for s in sessions:
-            d = details.get(s["session_id"], {})
-            s["versions"] = d.get("versions", [])
-            s["models"] = d.get("models", [])
-
-    status_data = {
-        **project,
-        "sessions": sessions,
-        "resume_cmd": resume_cmd,
-    }
+    status_data = _project_session_data(project, args.sessions)
     latency_ms = int((time.monotonic() - start) * 1000)
 
     if args.pretty:
         pretty.print_status(status_data)
     else:
         env = envelope.ok(status_data, latency_ms=latency_ms)
+        print(envelope.to_json(env))
+
+
+def _cmd_chats(args: argparse.Namespace) -> None:
+    start = time.monotonic()
+    project = _resolve_project_arg(args.project, here=args.here, source="chats")
+    status_data = _project_session_data(project, args.limit)
+    sessions = status_data["sessions"]
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if args.pretty:
+        pretty.print_sessions(status_data)
+    else:
+        env = envelope.ok(
+            sessions,
+            project={
+                "id": project.get("id"),
+                "name": project.get("name"),
+                "path": project.get("path"),
+            },
+            total=len(sessions),
+            limit=args.limit,
+            latency_ms=latency_ms,
+        )
         print(envelope.to_json(env))
 
 
@@ -518,6 +589,8 @@ def main(argv: list[str] | None = None) -> None:
     raw = argv if argv is not None else sys.argv[1:]
     if raw and raw[0] == "status":
         raw = ["show"] + raw[1:]
+    if len(raw) >= 2 and raw[0] == "chat" and raw[1] == "list":
+        raw = ["chats"] + raw[2:]
     args = parser.parse_args(raw)
 
     if not args.command:
@@ -552,5 +625,7 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_search(args)
     elif args.command == "chat":
         _cmd_chat(args)
+    elif args.command == "chats":
+        _cmd_chats(args)
     elif args.command == "census":
         _cmd_census(args)

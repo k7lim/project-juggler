@@ -156,6 +156,18 @@ Shows project metadata, recent sessions with models and durations, and a resume 
 
 `pj status` remains as a hidden compatibility alias.
 
+### `pj chats` - List chats for a project
+
+```bash
+pj chats --here --pretty
+pj chats myproject --limit 50
+pj chat list --here --pretty
+```
+
+Lists the session IDs and titles for a project. With no project argument,
+`pj chats` infers the project from the current working directory; `pj chat list`
+is an alias for the same listing command.
+
 ### `pj resume` — Jump back in
 
 ```bash

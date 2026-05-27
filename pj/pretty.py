@@ -251,6 +251,34 @@ def print_status(data: dict) -> None:
         print(f"\nResume:\n  {resume_cmd}")
 
 
+def print_sessions(data: dict) -> None:
+    """Render a compact list of project sessions."""
+    project = data.get("name", "?")
+    path = data.get("path", "?")
+    sessions = data.get("sessions", [])
+
+    print(f"Chats: {_c('1', project)}")
+    print(f"  Path: {path}")
+
+    if not sessions:
+        print("\nNo chats found.")
+        return
+
+    print()
+    for s in sessions:
+        agent = s.get("agent", "?")
+        title = s.get("title") or "(untitled)"
+        when = _relative_time(_session_activity_time(s))
+        sid = str(s.get("session_id", ""))[:12]
+        model = s.get("model") or ""
+        model_tag = f" {_c('36', model)}" if model else ""
+        dur = _format_duration(s.get("duration_secs"))
+        dur_tag = f" {_c('33', dur)}" if dur else ""
+        print(f"  {sid}  [{agent}] {title}  ({when}){model_tag}{dur_tag}")
+
+    print(_c("2", f"\n--- {len(sessions)} chats ---"))
+
+
 def _format_hours(secs: float | None) -> str:
     """Format total seconds as compact hours string."""
     if not secs or secs <= 0:

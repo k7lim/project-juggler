@@ -1439,6 +1439,89 @@ def test_cli_status_not_found(capsys):
     assert parsed["success"] is False
 
 
+# --- cli chats ---
+
+def test_cli_chats_here_lists_current_project_sessions(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/chat-list", "agents": ["codex"], "session_count": 2, "last_active": now_iso}]
+    fake_sessions = [
+        {"session_id": "sess-1", "agent": "codex", "title": "first chat", "started_at": now_iso},
+        {"session_id": "sess-2", "agent": "codex", "title": "second chat", "started_at": now_iso},
+    ]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/chat-list/subdir"), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions), \
+         mock.patch.object(cass_facade, "session_details", return_value={}):
+        cli.main(["chats", "--here"])
+
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["meta"]["project"]["path"] == "/tmp/chat-list"
+    assert parsed["meta"]["total"] == 2
+    assert parsed["data"][0]["session_id"] == "sess-1"
+
+
+def test_cli_chats_defaults_to_current_project(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/chat-default", "agents": ["claude"], "session_count": 1, "last_active": now_iso}]
+    fake_sessions = [
+        {"session_id": "sess-default", "agent": "claude", "title": "default current chat", "started_at": now_iso},
+    ]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/chat-default"), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions), \
+         mock.patch.object(cass_facade, "session_details", return_value={}):
+        cli.main(["chats"])
+
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"][0]["title"] == "default current chat"
+
+
+def test_cli_chat_list_alias_pretty(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/chat-alias", "agents": ["codex"], "session_count": 1, "last_active": now_iso}]
+    fake_sessions = [
+        {"session_id": "sess-alias", "agent": "codex", "title": "alias chat", "started_at": now_iso},
+    ]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/chat-alias"), \
+         mock.patch.object(cass_facade, "project_sessions", return_value=fake_sessions), \
+         mock.patch.object(cass_facade, "session_details", return_value={}):
+        cli.main(["chat", "list", "--here", "--pretty"])
+
+    out = capsys.readouterr().out
+    assert "Chats: chat-alias" in out
+    assert "sess-alias" in out
+    assert "alias chat" in out
+
+
+def test_cli_chats_here_outside_project_errors(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake = [{"path": "/tmp/chat-list", "agents": ["codex"], "session_count": 1, "last_active": now_iso}]
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch("os.getcwd", return_value="/tmp/elsewhere"), \
+         pytest.raises(SystemExit) as exc:
+        cli.main(["chats", "--here"])
+
+    assert exc.value.code == 1
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert "not inside a discovered project" in parsed["meta"]["error"]
+
+
 # --- cli resume ---
 
 def test_cli_resume(capsys):
