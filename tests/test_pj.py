@@ -475,7 +475,7 @@ def test_cli_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert "pj 0.2.1" in capsys.readouterr().out
+    assert "pj 0.2.2" in capsys.readouterr().out
 
 
 # --- project_id ---
