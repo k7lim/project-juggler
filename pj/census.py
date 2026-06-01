@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import discover
+from . import discover, runtime_ports
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -102,6 +102,48 @@ def normalize_projects(projects: list[dict]) -> list[dict]:
     return [normalize_project(project) for project in projects]
 
 
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _overlay_ports(rows: list[dict], projects: list[dict]) -> tuple[list[dict], dict]:
+    records, port_meta = runtime_ports.discover_ports(projects=projects)
+    by_project: dict[str, list[dict]] = {}
+    for record in records:
+        project_id = record.get("project_id")
+        if not project_id:
+            continue
+        by_project.setdefault(str(project_id), []).append(dict(record))
+
+    enriched: list[dict] = []
+    for row in rows:
+        row = dict(row)
+        ports = by_project.get(str(row.get("id")), [])
+        row["ports"] = ports
+        row["live_urls"] = _unique(
+            [url for port in ports for url in port.get("live_urls", []) if isinstance(url, str)]
+        )
+        row["live_port_count"] = len(ports)
+        enriched.append(row)
+
+    meta = {
+        "ports_included": True,
+        "ports_total": port_meta.get("total", len(records)),
+        "ports_sources": port_meta.get("sources", []),
+    }
+    warnings = port_meta.get("warnings")
+    if warnings:
+        meta["warnings"] = warnings
+    return enriched, meta
+
+
 def summarize(rows: list[dict], *, total: int | None = None) -> dict:
     state_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
@@ -125,7 +167,11 @@ def summarize(rows: list[dict], *, total: int | None = None) -> dict:
     }
 
 
-def snapshot(limit: int = 10000) -> dict:
+def snapshot(limit: int = 10000, *, include_ports: bool = False) -> dict:
     projects, total = discover.discover(limit=limit, detail=True)
     rows = normalize_projects(projects)
-    return {"rows": rows, "meta": summarize(rows, total=total)}
+    meta = summarize(rows, total=total)
+    if include_ports:
+        rows, port_meta = _overlay_ports(rows, projects)
+        meta.update(port_meta)
+    return {"rows": rows, "meta": meta}

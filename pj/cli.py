@@ -258,6 +258,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="serve in foreground, start in background, inspect status, or stop the server",
     )
     census_p.add_argument("--limit", type=int, default=10000, help="Max projects (default: 10000)")
+    census_p.add_argument(
+        "--include-ports",
+        action="store_true",
+        help="Include matching local runtime ports in census rows",
+    )
     census_p.add_argument("--host", default="127.0.0.1", help="Serve host (default: 127.0.0.1)")
     census_p.add_argument("--port", type=int, default=8765, help="Serve port (default: 8765)")
     census_p.add_argument(
@@ -552,7 +557,7 @@ def _cmd_census(args: argparse.Namespace) -> None:
 
     from . import census
 
-    snap = census.snapshot(limit=args.limit)
+    snap = census.snapshot(limit=args.limit, include_ports=args.include_ports)
     print(envelope.to_json(envelope.ok(snap["rows"], **snap["meta"])))
 
 

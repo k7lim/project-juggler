@@ -135,6 +135,122 @@ def test_snapshot_uses_detail_discovery():
     assert snap["meta"]["duration_hrs_total"] == 1.0
 
 
+def test_snapshot_without_ports_does_not_call_runtime_port_discovery():
+    projects = [{"id": "abc123", "name": "foo", "path": "/tmp/foo"}]
+
+    with mock.patch("pj.census.discover.discover", return_value=(projects, 1)), \
+         mock.patch("pj.census.runtime_ports.discover_ports") as ports_mock:
+        snap = census.snapshot(limit=50)
+
+    ports_mock.assert_not_called()
+    assert "live_urls" not in snap["rows"][0]
+    assert "live_port_count" not in snap["rows"][0]
+    assert "ports_included" not in snap["meta"]
+
+
+def test_snapshot_include_ports_overlays_strong_project_matches():
+    projects = [
+        {"id": "p1", "name": "foo", "path": "/tmp/foo"},
+        {"id": "p2", "name": "bar", "path": "/tmp/bar"},
+    ]
+    records = [
+        {
+            "project_id": "p1",
+            "path": "/tmp/foo",
+            "live_urls": ["http://127.0.0.1:3000/", "http://localhost:3000/"],
+            "port": 3000,
+            "confidence": "high",
+            "source": "lsof",
+        },
+        {
+            "project_id": "p1",
+            "path": "/tmp/foo",
+            "live_urls": ["http://127.0.0.1:3000/"],
+            "port": 3001,
+            "confidence": "medium",
+            "source": "ss",
+        },
+    ]
+
+    with mock.patch("pj.census.discover.discover", return_value=(projects, 2)), \
+         mock.patch(
+             "pj.census.runtime_ports.discover_ports",
+             return_value=(records, {"total": 2, "sources": ["lsof", "ss"], "warnings": ["ss partial"]}),
+         ) as ports_mock:
+        snap = census.snapshot(limit=50, include_ports=True)
+
+    ports_mock.assert_called_once_with(projects=projects)
+    foo = snap["rows"][0]
+    assert foo["ports"] == records
+    assert foo["live_urls"] == ["http://127.0.0.1:3000/", "http://localhost:3000/"]
+    assert foo["live_port_count"] == 2
+    assert snap["rows"][1]["ports"] == []
+    assert snap["rows"][1]["live_urls"] == []
+    assert snap["rows"][1]["live_port_count"] == 0
+    assert snap["meta"]["ports_included"] is True
+    assert snap["meta"]["ports_total"] == 2
+    assert snap["meta"]["ports_sources"] == ["lsof", "ss"]
+    assert snap["meta"]["warnings"] == ["ss partial"]
+
+
+def test_snapshot_include_ports_keeps_no_match_out_of_rows():
+    projects = [{"id": "p1", "name": "foo", "path": "/tmp/foo"}]
+    records = [
+        {
+            "project_id": None,
+            "path": None,
+            "live_urls": ["http://127.0.0.1:5432/"],
+            "port": 5432,
+            "confidence": "unknown",
+            "source": "lsof",
+        }
+    ]
+
+    with mock.patch("pj.census.discover.discover", return_value=(projects, 1)), \
+         mock.patch(
+             "pj.census.runtime_ports.discover_ports",
+             return_value=(records, {"total": 1, "sources": ["lsof"], "warnings": []}),
+         ):
+        snap = census.snapshot(include_ports=True)
+
+    assert snap["rows"][0]["ports"] == []
+    assert snap["rows"][0]["live_urls"] == []
+    assert snap["rows"][0]["live_port_count"] == 0
+    assert snap["meta"]["ports_total"] == 1
+
+
+def test_snapshot_include_ports_preserves_weak_match_and_ignores_ambiguous_record():
+    projects = [{"id": "p1", "name": "foo", "path": "/tmp/foo"}]
+    weak = {
+        "project_id": "p1",
+        "path": "/tmp/foo",
+        "live_urls": ["http://127.0.0.1:5173/"],
+        "port": 5173,
+        "confidence": "low",
+        "source": "lsof",
+    }
+    ambiguous = {
+        "project_id": None,
+        "path": None,
+        "live_urls": ["http://127.0.0.1:8888/"],
+        "port": 8888,
+        "confidence": "low",
+        "source": "lsof",
+    }
+
+    with mock.patch("pj.census.discover.discover", return_value=(projects, 1)), \
+         mock.patch(
+             "pj.census.runtime_ports.discover_ports",
+             return_value=([weak, ambiguous], {"total": 2, "sources": ["lsof"], "warnings": []}),
+         ):
+        snap = census.snapshot(include_ports=True)
+
+    assert snap["rows"][0]["ports"] == [weak]
+    assert snap["rows"][0]["live_urls"] == ["http://127.0.0.1:5173/"]
+    assert snap["rows"][0]["live_port_count"] == 1
+    assert snap["meta"]["ports_total"] == 2
+
+
 def test_census_cache_refreshes_only_when_signatures_change():
     signatures = iter([{"size": 1}, {"size": 1}, {"size": 2}])
     calls = []
@@ -159,6 +275,66 @@ def test_census_cache_refreshes_only_when_signatures_change():
     assert second["meta"]["signature_changed"] is False
     assert third["meta"]["signature_changed"] is True
     assert calls == [7, 7]
+
+
+def test_census_cache_keeps_port_enriched_snapshot_separate():
+    calls = []
+
+    def snapshot_fn(limit, *, include_ports=False):
+        calls.append((limit, include_ports))
+        base_row = {"id": "p1", "state": "active", "category": "sandbox", "origin": "mac"}
+        rows = [{**base_row, "live_port_count": 1}] if include_ports else [base_row]
+        return {"rows": rows, "meta": census.summarize(rows)}
+
+    cache = CensusCache(
+        limit=7,
+        check_interval=60,
+        snapshot_fn=snapshot_fn,
+        signatures_fn=lambda: {"size": 1},
+    )
+
+    plain = cache.get()
+    enriched = cache.get(include_ports=True)
+    plain_again = cache.get()
+
+    assert calls == [(7, False), (7, True)]
+    assert "live_port_count" not in plain["rows"][0]
+    assert enriched["rows"][0]["live_port_count"] == 1
+    assert "live_port_count" not in plain_again["rows"][0]
+
+
+def test_census_server_include_ports_query_passes_through_to_cache():
+    calls = []
+
+    def snapshot_fn(limit, *, include_ports=False):
+        calls.append((limit, include_ports))
+        base_row = {"id": "p1", "state": "active", "category": "sandbox", "origin": "mac"}
+        rows = [{**base_row, "live_port_count": 1}] if include_ports else [base_row]
+        meta = census.summarize(rows)
+        if include_ports:
+            meta["ports_included"] = True
+        return {"rows": rows, "meta": meta}
+
+    cache = CensusCache(
+        limit=7,
+        check_interval=0,
+        snapshot_fn=snapshot_fn,
+        signatures_fn=lambda: {"size": 1},
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cache))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, payload = _api_request(server, "/api/census?include_ports=1")
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    assert status == 200
+    assert calls == [(7, True)]
+    assert payload["data"][0]["live_port_count"] == 1
+    assert payload["meta"]["ports_included"] is True
 
 
 def test_census_server_search_endpoint_maps_cli_query_semantics():
@@ -354,6 +530,21 @@ def test_cli_census_outputs_dashboard_json(capsys):
     assert parsed["success"] is True
     assert parsed["data"] == snap["rows"]
     assert parsed["meta"]["total"] == 1
+
+
+def test_cli_census_include_ports_passes_snapshot_flag(capsys):
+    snap = {
+        "rows": [{"name": "foo", "path": "/tmp/foo", "live_urls": [], "live_port_count": 0}],
+        "meta": {"total": 1, "ports_included": True},
+    }
+
+    with mock.patch("pj.census.snapshot", return_value=snap) as snapshot_mock:
+        cli.main(["census", "--limit", "1", "--include-ports"])
+
+    snapshot_mock.assert_called_once_with(limit=1, include_ports=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["meta"]["ports_included"] is True
 
 
 def test_census_process_status_reports_running_without_control_token(tmp_path, monkeypatch):

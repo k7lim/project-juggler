@@ -625,7 +625,7 @@ class CensusCache:
         *,
         limit: int = 10000,
         check_interval: int = 60,
-        snapshot_fn: Callable[[int], dict] = census.snapshot,
+        snapshot_fn: Callable[..., dict] = census.snapshot,
         signatures_fn: Callable[[], dict] = cache.signatures,
     ) -> None:
         self.limit = limit
@@ -633,29 +633,34 @@ class CensusCache:
         self.snapshot_fn = snapshot_fn
         self.signatures_fn = signatures_fn
         self._lock = threading.Lock()
-        self._snapshot: dict | None = None
+        self._snapshots: dict[bool, dict] = {}
         self._signature: dict | None = None
         self._next_check = 0.0
         self._last_scan_secs = 0.0
 
-    def get(self, *, force: bool = False) -> dict:
+    def get(self, *, force: bool = False, include_ports: bool = False) -> dict:
         with self._lock:
             now = time.monotonic()
             signature_changed = False
             checked = False
 
-            if force or self._snapshot is None or now >= self._next_check:
+            if force or include_ports not in self._snapshots or now >= self._next_check:
                 checked = True
                 signature = self.signatures_fn()
                 signature_changed = signature != self._signature
-                if force or self._snapshot is None or signature_changed:
+                if force or include_ports not in self._snapshots or signature_changed:
+                    if signature_changed:
+                        self._snapshots.clear()
                     started = time.monotonic()
-                    self._snapshot = self.snapshot_fn(self.limit)
+                    if include_ports:
+                        self._snapshots[include_ports] = self.snapshot_fn(self.limit, include_ports=True)
+                    else:
+                        self._snapshots[include_ports] = self.snapshot_fn(self.limit)
                     self._last_scan_secs = time.monotonic() - started
                     self._signature = signature
                 self._next_check = now + self.check_interval
 
-            result = dict(self._snapshot or {"rows": [], "meta": census.summarize([])})
+            result = dict(self._snapshots.get(include_ports) or {"rows": [], "meta": census.summarize([])})
             meta = dict(result.get("meta", {}))
             meta.update(
                 signature_checked=checked,
@@ -685,7 +690,8 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/census":
                 params = parse_qs(parsed.query)
                 force = params.get("refresh", ["0"])[0] in ("1", "true", "yes")
-                snapshot = census_cache.get(force=force)
+                include_ports = params.get("include_ports", ["0"])[0] in ("1", "true", "yes")
+                snapshot = census_cache.get(force=force, include_ports=include_ports)
                 body = envelope.to_json(envelope.ok(snapshot["rows"], **snapshot["meta"]))
                 self._send_text(body, "application/json; charset=utf-8")
                 return
