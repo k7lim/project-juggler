@@ -179,17 +179,25 @@ def _is_inside(path: str, parent: str) -> bool:
 
 
 def _associate(record: dict, projects: Iterable[dict]) -> dict:
+    projects = list(projects)
     cwd = record.get("cwd")
     command = (record.get("command") or "").lower()
-    for project in projects:
+    containing_projects = sorted(
+        (
+            project for project in projects
+            if cwd and project.get("path") and _is_inside(str(cwd), str(project.get("path")))
+        ),
+        key=lambda project: len(os.path.realpath(str(project.get("path") or ""))),
+        reverse=True,
+    )
+    for project in containing_projects:
         path = project.get("path")
-        if cwd and path and _is_inside(str(cwd), str(path)):
-            record["project_id"] = project.get("id")
-            record["path"] = path
-            record["confidence"] = "high"
-            return record
+        record["project_id"] = project.get("id")
+        record["path"] = path
+        record["confidence"] = "high"
+        return record
 
-    for project in projects:
+    for project in sorted(projects, key=lambda project: len(str(project.get("path") or "")), reverse=True):
         path = str(project.get("path") or "")
         name = str(project.get("name") or "")
         if path and path.lower() in command:

@@ -120,6 +120,33 @@ def test_discover_ports_associates_cwd_inside_project_as_high_confidence():
     assert records[0]["confidence"] == "high"
 
 
+def test_discover_ports_prefers_most_specific_containing_project_path():
+    projects = [
+        {"id": "parent", "name": "kevin", "path": "/Users/kevin"},
+        {
+            "id": "child",
+            "name": "subreddit-analysis",
+            "path": "/Users/kevin/Development/sandbox/projects/subreddit-analysis",
+        },
+    ]
+
+    def runner(argv):
+        if argv[0] == "lsof":
+            return subprocess.CompletedProcess(argv, 0, LSOF_OUTPUT, "")
+        return subprocess.CompletedProcess(argv, 1, "", "no ss")
+
+    with mock.patch(
+        "pj.runtime_ports._pid_cwd",
+        return_value="/Users/kevin/Development/sandbox/projects/subreddit-analysis",
+    ), mock.patch("pj.runtime_ports.Path.exists", return_value=False):
+        records, meta = runtime_ports.discover_ports(projects=projects, runner=runner)
+
+    assert meta["warnings"] == ["ss exited 1: no ss"]
+    assert records[0]["project_id"] == "child"
+    assert records[0]["path"] == "/Users/kevin/Development/sandbox/projects/subreddit-analysis"
+    assert records[0]["confidence"] == "high"
+
+
 def test_ports_facade_returns_empty_error_envelope_for_unexpected_failure():
     def boom(*, project=None, runner=None):
         raise RuntimeError("discovery exploded")
