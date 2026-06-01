@@ -154,6 +154,30 @@ associated with discovered projects. It is a CLI-first contract; any web API or
 dashboard view must reuse the same discovery behavior and response fields rather
 than adding browser-only behavior.
 
+Live port links are an optional runtime sensor, not part of core project
+discovery. Project discovery answers "what projects exist and where are they?";
+port discovery answers "what local listeners appear to be related right now?"
+using transient process metadata. `pj ports` only inspects local listening TCP
+ports and process details such as PID, command, and working directory when the
+platform exposes them. It does not start, stop, restart, connect to, or mutate
+processes or sockets.
+
+This keeps the boundary explicit:
+
+| Boundary | pj behavior |
+|----------|-------------|
+| Sensor, not actuator | Report observed local runtime endpoints; never manage the runtime lifecycle. |
+| CLI first | `pj ports` is the source of truth; dashboards and APIs surface the same records. |
+| Optional enrichment | `pj census --include-ports` adds runtime hints without changing default census discovery. |
+| Best effort | Missing tools, permissions, or process metadata lower confidence or produce warnings instead of redefining projects. |
+| Local only | Discovery is limited to the current machine's listening ports and local process metadata. |
+
+Because port records can expose local URLs, process commands, and working
+directories, callers should treat the output as local developer telemetry. pj
+does not publish these records remotely by default, and UI surfaces should avoid
+sharing them outside the local operator's context without an explicit user
+action.
+
 ```bash
 pj ports                         # JSON array of local runtime port records
 pj ports --project myproject      # Filter records to one project query
@@ -212,6 +236,13 @@ confidence instead of failing the whole command. A command failure is reserved
 for invalid arguments, unreadable project state, or an unexpected discovery
 error; partial discovery failures should be reported in `meta.warnings` when
 practical.
+
+Port discovery should become a separate tool instead of pj core if it needs to
+act on processes, probe remote hosts, require privileged agents, maintain a
+long-lived watcher, collect historical telemetry, or perform protocol-specific
+health checks. Those behaviors are runtime management or observability concerns;
+pj should only surface the current local signal needed to enrich project
+navigation.
 
 `pj census --include-ports` keeps census rows as the primary data shape and adds
 port information without changing the default `pj census` contract. Each census
