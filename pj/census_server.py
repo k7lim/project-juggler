@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import annotate, cache, census, discover, envelope
+from . import annotate, cache, census, discover, envelope, resume
 from . import search as search_mod
 from .project_sessions import project_session_data
 from .session_store import get_store
@@ -98,6 +98,34 @@ HTML = """<!DOCTYPE html>
   .git-dot { color: var(--text-dim); }
   .note-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); font-size: 11px; }
   .error { color: var(--red); margin-bottom: 10px; display: none; }
+  .search-panel {
+    display: none; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); margin-bottom: 12px;
+  }
+  .search-head {
+    display: flex; justify-content: space-between; gap: 12px; align-items: center;
+    padding: 6px 8px; border-bottom: 1px solid var(--border);
+  }
+  .search-title { color: var(--text-bright); font-weight: 650; }
+  .search-meta { color: var(--text-dim); font-size: 11px; }
+  .search-results { display: grid; }
+  .search-result { padding: 8px; border-bottom: 1px solid var(--border); }
+  .search-result:last-child { border-bottom: 0; }
+  .search-result:hover { background: rgba(88,166,255,0.05); }
+  .result-top { display: flex; gap: 8px; justify-content: space-between; align-items: baseline; }
+  .result-name { color: var(--text-bright); font-weight: 650; }
+  .result-fields { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .result-path { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+  .result-note, .snippet { color: var(--text); margin-top: 4px; }
+  .session-hit { margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--border); }
+  .session-title { color: var(--text-bright); }
+  .session-meta { color: var(--text-dim); font-size: 11px; }
+  .resume-row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+  .resume-cmd {
+    color: var(--cyan); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 5px; font-size: 11px; overflow-wrap: anywhere;
+  }
+  .copy-resume { padding: 3px 6px; font-size: 11px; flex: 0 0 auto; }
   @media (max-width: 720px) {
     body { padding: 14px; }
     header { display: block; }
@@ -118,13 +146,22 @@ HTML = """<!DOCTYPE html>
 <div class="error" id="error"></div>
 
 <div class="controls">
-  <input type="text" id="search" placeholder="Filter name / path / note..." autofocus>
+  <input type="text" id="search" placeholder="Search projects and sessions..." autofocus>
+  <input type="text" id="tableFilter" placeholder="Filter census table...">
   <select id="stateFilter"><option value="">All states</option></select>
   <select id="catFilter"><option value="">All categories</option></select>
   <select id="originFilter"><option value="">All origins</option></select>
   <label><input type="checkbox" id="beadsOnly"> Beads</label>
   <span id="row-count"></span>
 </div>
+
+<section class="search-panel" id="searchPanel" aria-live="polite">
+  <div class="search-head">
+    <span class="search-title" id="searchTitle">Search results</span>
+    <span class="search-meta" id="searchMeta"></span>
+  </div>
+  <div class="search-results" id="searchResults"></div>
+</section>
 
 <div class="table-wrap">
 <table>
@@ -156,6 +193,8 @@ let META = {};
 let sortKey = "last_active_ts";
 let sortDir = -1;
 let maxDur = 1;
+let searchTimer = null;
+let searchRequestId = 0;
 
 function esc(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -192,7 +231,7 @@ function updateSelect(id, values, labels) {
 }
 
 function filteredRows() {
-  const q = document.getElementById("search").value.toLowerCase();
+  const q = document.getElementById("tableFilter").value.toLowerCase();
   const sf = document.getElementById("stateFilter").value;
   const cf = document.getElementById("catFilter").value;
   const of_ = document.getElementById("originFilter").value;
@@ -215,6 +254,97 @@ function filteredRows() {
     return String(va || "").localeCompare(String(vb || "")) * sortDir;
   });
   return rows;
+}
+
+function compactDate(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+}
+
+function renderResume(cmd) {
+  if (!cmd) return "";
+  return `<div class="resume-row"><code class="resume-cmd">${esc(cmd)}</code><button class="copy-resume" data-cmd="${esc(cmd)}">Copy</button></div>`;
+}
+
+function renderSessionHit(session) {
+  const title = session.title || "(untitled)";
+  const when = compactDate(session.ended_at || session.started_at);
+  const sid = session.session_id ? ` · ${String(session.session_id).slice(0, 12)}` : "";
+  const agent = session.agent ? `${session.agent}` : "";
+  const meta = [agent, when].filter(Boolean).join(" · ") + sid;
+  return `<div class="session-hit">
+    <div class="session-title">${esc(title)}</div>
+    ${meta ? `<div class="session-meta">${esc(meta)}</div>` : ""}
+    ${session.snippet ? `<div class="snippet">${esc(session.snippet)}</div>` : ""}
+    ${renderResume(session.resume_cmd)}
+  </div>`;
+}
+
+function renderSearchResults(results, meta) {
+  const panel = document.getElementById("searchPanel");
+  const q = document.getElementById("search").value.trim();
+  if (!q) {
+    panel.style.display = "none";
+    document.getElementById("searchResults").innerHTML = "";
+    return;
+  }
+
+  panel.style.display = "block";
+  document.getElementById("searchTitle").textContent = `Search: ${q}`;
+  document.getElementById("searchMeta").textContent = `${meta.total ?? results.length} results${meta.latency_ms === undefined ? "" : ` · ${meta.latency_ms} ms`}`;
+
+  if (!results.length) {
+    const hint = meta.hint ? `<div class="result-note">${esc(meta.hint)}</div>` : "";
+    document.getElementById("searchResults").innerHTML = `<div class="search-result">No results.${hint}</div>`;
+    return;
+  }
+
+  document.getElementById("searchResults").innerHTML = results.map(r => {
+    const fields = (r.match_fields || []).join(", ");
+    const sessions = (r.matching_sessions || []).slice(0, 3).map(renderSessionHit).join("");
+    const snippets = sessions ? "" : (r.snippets || []).slice(0, 2).map(s => `<div class="snippet">${esc(s)}</div>`).join("");
+    const note = r.latest_note || r.note || "";
+    return `<article class="search-result">
+      <div class="result-top">
+        <span class="result-name">${esc(r.name || "(unnamed)")}</span>
+        <span class="result-fields">${esc(fields)}</span>
+      </div>
+      <div class="result-path">${esc(r.path || "")}</div>
+      ${note ? `<div class="result-note">${esc(note)}</div>` : ""}
+      ${sessions}
+      ${snippets}
+    </article>`;
+  }).join("");
+}
+
+function scheduleSearch() {
+  clearTimeout(searchTimer);
+  const q = document.getElementById("search").value.trim();
+  if (!q) {
+    renderSearchResults([], {});
+    return;
+  }
+  document.getElementById("searchPanel").style.display = "block";
+  document.getElementById("searchTitle").textContent = `Search: ${q}`;
+  document.getElementById("searchMeta").textContent = "Searching...";
+  searchTimer = setTimeout(() => runSearch(q), 300);
+}
+
+async function runSearch(q) {
+  const requestId = ++searchRequestId;
+  try {
+    const response = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=8&sort=relevance`, { cache: "no-store" });
+    const payload = await response.json();
+    if (requestId !== searchRequestId) return;
+    if (!payload.success) throw new Error(payload.meta?.error || "search failed");
+    renderSearchResults(payload.data || [], payload.meta || {});
+  } catch (err) {
+    if (requestId !== searchRequestId) return;
+    document.getElementById("searchPanel").style.display = "block";
+    document.getElementById("searchMeta").textContent = "";
+    document.getElementById("searchResults").innerHTML = `<div class="search-result" style="color: var(--red);">${esc(err)}</div>`;
+  }
 }
 
 function render() {
@@ -287,9 +417,15 @@ document.querySelectorAll("th").forEach(th => {
   });
 });
 
-["search", "stateFilter", "catFilter", "originFilter", "beadsOnly"].forEach(id => {
+["tableFilter", "stateFilter", "catFilter", "originFilter", "beadsOnly"].forEach(id => {
   const el = document.getElementById(id);
   el.addEventListener(el.tagName === "INPUT" && el.type === "text" ? "input" : "change", render);
+});
+document.getElementById("search").addEventListener("input", scheduleSearch);
+document.getElementById("searchResults").addEventListener("click", event => {
+  const button = event.target.closest(".copy-resume");
+  if (!button) return;
+  navigator.clipboard?.writeText(button.dataset.cmd || "");
 });
 document.getElementById("refresh").addEventListener("click", () => loadData(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadData(false); });
@@ -454,6 +590,7 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
             except ValueError as exc:
                 self._send_json(envelope.err(str(exc), source="search"), status=400)
                 return
+            results = _with_resume_commands(results)
             latency_ms = int((time.monotonic() - started) * 1000)
             hint = None
             regex = _bool_param(params, "regex", False)
@@ -603,6 +740,26 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
 def _annotation_project_path(project_ref: str) -> str:
     project = discover.resolve_project(project_ref)
     return project["path"] if project else project_ref
+
+
+def _with_resume_commands(results: list[dict]) -> list[dict]:
+    enriched = []
+    for result in results:
+        item = dict(result)
+        path = str(item.get("path") or "")
+        sessions = []
+        for session in item.get("matching_sessions") or []:
+            session_item = dict(session)
+            session_id = session_item.get("session_id")
+            agent = session_item.get("agent")
+            if path and agent and session_id:
+                session_item["resume_cmd"] = resume.full_resume_command(path, str(agent), str(session_id))
+            sessions.append(session_item)
+        if sessions:
+            item["matching_sessions"] = sessions
+            item["resume_cmd"] = sessions[0].get("resume_cmd")
+        enriched.append(item)
+    return enriched
 
 
 def _str_param(params: dict[str, list[str]], name: str, default: str) -> str:

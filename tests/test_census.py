@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from unittest import mock
 
 from pj import census, census_process, cli
-from pj.census_server import CensusCache, make_handler
+from pj.census_server import CensusCache, HTML, make_handler
 
 
 def _api_request(server, path, *, method="GET", body=None):
@@ -159,7 +159,21 @@ def test_census_server_search_endpoint_maps_cli_query_semantics():
     try:
         with mock.patch(
             "pj.census_server.search_mod.search",
-            return_value=[{"id": "p1", "name": "sports", "path": "/tmp/sports"}],
+            return_value=[
+                {
+                    "id": "p1",
+                    "name": "sports",
+                    "path": "/tmp/sports",
+                    "matching_sessions": [
+                        {
+                            "session_id": "sess-1",
+                            "agent": "codex",
+                            "title": "sports search",
+                            "snippet": "discussed soccer search",
+                        }
+                    ],
+                }
+            ],
         ) as search:
             status, payload = _api_request(
                 server,
@@ -181,8 +195,19 @@ def test_census_server_search_endpoint_maps_cli_query_semantics():
     )
     assert payload["success"] is True
     assert payload["data"][0]["name"] == "sports"
+    assert payload["data"][0]["resume_cmd"] == "cd /tmp/sports && codex resume sess-1"
+    assert payload["data"][0]["matching_sessions"][0]["resume_cmd"] == "cd /tmp/sports && codex resume sess-1"
     assert payload["meta"]["query"] == ["sport", "soccer"]
     assert payload["meta"]["total"] == 1
+
+
+def test_census_dashboard_has_live_search_and_separate_table_filter():
+    assert 'id="search" placeholder="Search projects and sessions..."' in HTML
+    assert 'id="tableFilter" placeholder="Filter census table..."' in HTML
+    assert "setTimeout(() => runSearch(q), 300)" in HTML
+    assert "fetch(`/api/search?q=${encodeURIComponent(q)}&limit=8&sort=relevance`" in HTML
+    assert "matching_sessions" in HTML
+    assert "resume_cmd" in HTML
 
 
 def test_census_server_show_chats_and_chat_endpoints_map_to_session_store():
