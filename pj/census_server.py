@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import annotate, cache, census, discover, envelope, resume
 from . import search as search_mod
-from .project_sessions import project_session_data
+from .project_sessions import project_session_data, resolve_project_detail
 from .session_store import get_store
 
 
@@ -126,10 +126,49 @@ HTML = """<!DOCTYPE html>
     border-radius: 4px; padding: 3px 5px; font-size: 11px; overflow-wrap: anywhere;
   }
   .copy-resume { padding: 3px 6px; font-size: 11px; flex: 0 0 auto; }
+  .drawer-backdrop {
+    position: fixed; inset: 0; background: rgba(1,4,9,0.58); z-index: 10;
+    display: none;
+  }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 100%);
+    background: var(--surface); border-left: 1px solid var(--border); z-index: 11;
+    transform: translateX(100%); transition: transform 150ms ease; overflow-y: auto;
+    box-shadow: -12px 0 28px rgba(1,4,9,0.35);
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-backdrop.open { display: block; }
+  .drawer-head {
+    position: sticky; top: 0; display: flex; justify-content: space-between; gap: 12px;
+    align-items: flex-start; padding: 14px 16px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-title { min-width: 0; }
+  .drawer-title h2 {
+    color: var(--text-bright); font-size: 17px; line-height: 1.25; margin: 0 0 3px;
+    overflow-wrap: anywhere;
+  }
+  .drawer-path { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+  .drawer-close { flex: 0 0 auto; padding: 4px 8px; }
+  .drawer-body { padding: 14px 16px 22px; }
+  .drawer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .detail-item { border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px; background: var(--bg); min-width: 0; }
+  .detail-label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .detail-value { color: var(--text-bright); overflow-wrap: anywhere; }
+  .drawer-section { margin-top: 14px; }
+  .drawer-section h3 { color: var(--text-bright); font-size: 12px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .session-list { display: grid; gap: 8px; }
+  .session-card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--bg); }
+  .session-card .session-title { font-weight: 650; overflow-wrap: anywhere; }
+  .session-extra { color: var(--text-dim); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
+  tr { cursor: pointer; }
+  tr.selected { background: rgba(88,166,255,0.1); }
   @media (max-width: 720px) {
     body { padding: 14px; }
     header { display: block; }
     #row-count { width: 100%; margin-left: 0; }
+    .drawer { width: 100%; }
+    .drawer-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -163,6 +202,18 @@ HTML = """<!DOCTYPE html>
   <div class="search-results" id="searchResults"></div>
 </section>
 
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<aside class="drawer" id="projectDrawer" aria-hidden="true" aria-labelledby="drawerProjectName">
+  <div class="drawer-head">
+    <div class="drawer-title">
+      <h2 id="drawerProjectName">Project</h2>
+      <div class="drawer-path" id="drawerProjectPath"></div>
+    </div>
+    <button class="drawer-close" id="drawerClose" aria-label="Close project details">Close</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
 <div class="table-wrap">
 <table>
 <thead>
@@ -195,6 +246,8 @@ let sortDir = -1;
 let maxDur = 1;
 let searchTimer = null;
 let searchRequestId = 0;
+let detailRequestId = 0;
+let activeProjectId = null;
 
 function esc(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -281,6 +334,118 @@ function renderSessionHit(session) {
   </div>`;
 }
 
+function durationText(seconds) {
+  if (!seconds) return "";
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+}
+
+function listText(value) {
+  if (!value) return "";
+  return Array.isArray(value) ? value.filter(Boolean).join(", ") : String(value);
+}
+
+function detailItem(label, value) {
+  if (value === undefined || value === null || value === "") return "";
+  return `<div class="detail-item"><div class="detail-label">${esc(label)}</div><div class="detail-value">${esc(value)}</div></div>`;
+}
+
+function sessionActivityTime(session) {
+  return session.ended_at || session.updated_at || session.started_at || "";
+}
+
+function renderDetailSession(session) {
+  const title = session.title || "(untitled)";
+  const sid = session.session_id ? String(session.session_id).slice(0, 12) : "";
+  const bits = [
+    session.agent,
+    compactDate(sessionActivityTime(session)),
+    sid,
+  ].filter(Boolean);
+  const extras = [
+    session.model,
+    listText(session.models),
+    listText((session.versions || []).map(v => `v${v}`)),
+    durationText(session.duration_secs),
+  ].filter(Boolean);
+  return `<article class="session-card">
+    <div class="session-title">${esc(title)}</div>
+    ${bits.length ? `<div class="session-meta">${esc(bits.join(" · "))}</div>` : ""}
+    ${extras.length ? `<div class="session-extra">${esc(extras.join(" | "))}</div>` : ""}
+  </article>`;
+}
+
+function renderProjectDetail(project) {
+  document.getElementById("drawerProjectName").textContent = project.name || "(unnamed)";
+  document.getElementById("drawerProjectPath").textContent = project.path || "";
+  const sessions = project.sessions || [];
+  const detailRows = [
+    detailItem("ID", project.id),
+    detailItem("State", project.state),
+    detailItem("Priority", project.priority || "none"),
+    detailItem("Sessions", project.session_count ?? sessions.length),
+    detailItem("Agents", listText(project.agents)),
+    detailItem("Models", listText(project.models)),
+    detailItem("Tags", listText(project.tags)),
+    detailItem("Last active", compactDate(project.last_active)),
+  ].join("");
+  const note = project.latest_note ? `<div class="drawer-section"><h3>Note</h3><div class="detail-item"><div class="detail-value">${esc(project.latest_note)}</div></div></div>` : "";
+  const resume = project.resume_cmd ? `<div class="drawer-section"><h3>Resume</h3>${renderResume(project.resume_cmd)}</div>` : "";
+  const sessionList = sessions.length
+    ? sessions.map(renderDetailSession).join("")
+    : `<div class="detail-item"><div class="detail-value">No recent sessions</div></div>`;
+  document.getElementById("drawerBody").innerHTML = `
+    <div class="drawer-grid">${detailRows}</div>
+    ${note}
+    ${resume}
+    <div class="drawer-section">
+      <h3>Recent sessions</h3>
+      <div class="session-list">${sessionList}</div>
+    </div>`;
+}
+
+function setDrawerOpen(open) {
+  const drawer = document.getElementById("projectDrawer");
+  const backdrop = document.getElementById("drawerBackdrop");
+  drawer.classList.toggle("open", open);
+  backdrop.classList.toggle("open", open);
+  drawer.setAttribute("aria-hidden", open ? "false" : "true");
+  if (!open) {
+    activeProjectId = null;
+    document.querySelectorAll("tr.selected").forEach(row => row.classList.remove("selected"));
+  }
+}
+
+function closeDrawer() {
+  detailRequestId++;
+  setDrawerOpen(false);
+}
+
+async function openProjectDetail(projectId) {
+  if (!projectId) return;
+  activeProjectId = projectId;
+  const requestId = ++detailRequestId;
+  document.querySelectorAll("tr.selected").forEach(row => row.classList.toggle("selected", row.dataset.projectId === projectId));
+  document.getElementById("drawerProjectName").textContent = "Loading...";
+  document.getElementById("drawerProjectPath").textContent = "";
+  document.getElementById("drawerBody").innerHTML = "";
+  setDrawerOpen(true);
+  try {
+    const response = await fetch(`/api/show?project=${encodeURIComponent(projectId)}&sessions=10`, { cache: "no-store" });
+    const payload = await response.json();
+    if (requestId !== detailRequestId) return;
+    if (!payload.success) throw new Error(payload.meta?.error || "project detail failed");
+    renderProjectDetail(payload.data || {});
+  } catch (err) {
+    if (requestId !== detailRequestId) return;
+    document.getElementById("drawerProjectName").textContent = "Project detail";
+    document.getElementById("drawerBody").innerHTML = `<div class="detail-item" style="color: var(--red);">${esc(err)}</div>`;
+  }
+}
+
 function renderSearchResults(results, meta) {
   const panel = document.getElementById("searchPanel");
   const q = document.getElementById("search").value.trim();
@@ -351,7 +516,7 @@ function render() {
   maxDur = Math.max(...DATA.map(r => r.duration_hrs || 0), 1);
   const rows = filteredRows();
   document.getElementById("tbody").innerHTML = rows.map(r => `
-    <tr>
+    <tr data-project-id="${esc(r.id)}">
       <td class="name" title="${esc(r.name)}">${esc(r.name)}</td>
       <td class="cat-${esc(r.category)}">${esc(r.category)}</td>
       <td class="origin-${esc(r.origin)}">${esc(r.origin)}</td>
@@ -385,6 +550,9 @@ function render() {
 
   document.querySelectorAll("th").forEach(t => t.classList.remove("sorted"));
   document.querySelector(`th[data-key="${sortKey}"]`)?.classList.add("sorted");
+  if (activeProjectId) {
+    document.querySelectorAll("tr").forEach(row => row.classList.toggle("selected", row.dataset.projectId === activeProjectId));
+  }
 }
 
 async function loadData(force = false) {
@@ -426,6 +594,20 @@ document.getElementById("searchResults").addEventListener("click", event => {
   const button = event.target.closest(".copy-resume");
   if (!button) return;
   navigator.clipboard?.writeText(button.dataset.cmd || "");
+});
+document.getElementById("tbody").addEventListener("click", event => {
+  const row = event.target.closest("tr[data-project-id]");
+  if (row) openProjectDetail(row.dataset.projectId);
+});
+document.getElementById("drawerClose").addEventListener("click", closeDrawer);
+document.getElementById("drawerBackdrop").addEventListener("click", closeDrawer);
+document.getElementById("projectDrawer").addEventListener("click", event => {
+  const button = event.target.closest(".copy-resume");
+  if (!button) return;
+  navigator.clipboard?.writeText(button.dataset.cmd || "");
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeDrawer();
 });
 document.getElementById("refresh").addEventListener("click", () => loadData(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadData(false); });
@@ -616,12 +798,11 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
             if not project_ref:
                 self._send_json(envelope.err("Missing required query parameter: project", source="show"), status=400)
                 return
-            project = discover.resolve_project(project_ref)
-            if project is None:
+            started = time.monotonic()
+            data = resolve_project_detail(project_ref, _int_param(params, "sessions", 10))
+            if data is None:
                 self._send_json(envelope.err(f"No project matching {project_ref!r}", source="show"), status=404)
                 return
-            started = time.monotonic()
-            data = project_session_data(project, _int_param(params, "sessions", 10))
             self._send_json(envelope.ok(data, latency_ms=int((time.monotonic() - started) * 1000)))
 
         def _handle_chats(self, params: dict[str, list[str]]) -> None:

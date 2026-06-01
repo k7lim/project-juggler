@@ -10,6 +10,7 @@ from unittest import mock
 
 from pj import census, census_process, cli
 from pj.census_server import CensusCache, HTML, make_handler
+from pj.project_sessions import resolve_project_detail
 
 
 def _api_request(server, path, *, method="GET", body=None):
@@ -201,9 +202,42 @@ def test_census_server_search_endpoint_maps_cli_query_semantics():
     assert payload["meta"]["total"] == 1
 
 
-def test_census_dashboard_has_live_search_and_separate_table_filter():
+def test_resolve_project_detail_uses_discovery_rules_for_id_name_and_path():
+    projects = [
+        {
+            "id": "abc12345",
+            "name": "proj",
+            "path": "/tmp/proj",
+            "state": "active",
+            "session_count": 1,
+            "agents": ["codex"],
+        }
+    ]
+    store = mock.Mock()
+    store.project_sessions.return_value = [{"session_id": "sess-1", "agent": "codex", "title": "Build drawer"}]
+    store.session_details.return_value = {"sess-1": {"models": ["gpt-5"], "versions": ["0.2.2"]}}
+
+    with mock.patch("pj.discover.discover", return_value=(projects, 1)), \
+         mock.patch("pj.project_sessions.get_store", return_value=store):
+        by_id = resolve_project_detail("abc", 3)
+        by_name = resolve_project_detail("proj", 3)
+        by_path = resolve_project_detail("/tmp/proj", 3)
+
+    assert by_id["id"] == "abc12345"
+    assert by_name["path"] == "/tmp/proj"
+    assert by_path["sessions"][0]["models"] == ["gpt-5"]
+    assert by_path["resume_cmd"] == "cd /tmp/proj && codex resume sess-1"
+
+
+def test_census_dashboard_has_live_search_table_filter_and_detail_drawer():
     assert 'id="search" placeholder="Search projects and sessions..."' in HTML
     assert 'id="tableFilter" placeholder="Filter census table..."' in HTML
+    assert 'id="projectDrawer"' in HTML
+    assert 'id="drawerClose"' in HTML
+    assert 'data-project-id="${esc(r.id)}"' in HTML
+    assert "openProjectDetail(row.dataset.projectId)" in HTML
+    assert "fetch(`/api/show?project=${encodeURIComponent(projectId)}&sessions=10`" in HTML
+    assert "renderProjectDetail(payload.data || {})" in HTML
     assert "setTimeout(() => runSearch(q), 300)" in HTML
     assert "fetch(`/api/search?q=${encodeURIComponent(q)}&limit=8&sort=relevance`" in HTML
     assert "matching_sessions" in HTML
@@ -227,7 +261,7 @@ def test_census_server_show_chats_and_chat_endpoints_map_to_session_store():
 
     server, thread = _test_server()
     try:
-        with mock.patch("pj.census_server.discover.resolve_project", return_value=project), \
+        with mock.patch("pj.project_sessions.discover.resolve_project", return_value=project), \
              mock.patch("pj.project_sessions.get_store", return_value=store), \
              mock.patch("pj.census_server.get_store", return_value=store):
             show_status, show_payload = _api_request(server, "/api/show?project=abc&sessions=1")

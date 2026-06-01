@@ -7,7 +7,7 @@ import time
 from . import __version__
 from . import annotate, discover, envelope, pretty, resume, runtime_ports, schedule
 from . import search as search_mod
-from .project_sessions import project_session_data
+from .project_sessions import project_session_data, resolve_project_detail
 from .session_store import get_store
 
 SEARCH_HELP = """\
@@ -335,13 +335,12 @@ def _cmd_show(args: argparse.Namespace) -> None:
         _missing_arg("show")
 
     start = time.monotonic()
-    project = discover.resolve_project(args.project)
-    if project is None:
+    status_data = resolve_project_detail(args.project, args.sessions)
+    if status_data is None:
         env = envelope.err(f"No project matching {args.project!r}")
         print(envelope.to_json(env))
         sys.exit(1)
 
-    status_data = project_session_data(project, args.sessions)
     latency_ms = int((time.monotonic() - start) * 1000)
 
     if args.pretty:

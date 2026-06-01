@@ -2,8 +2,17 @@ from __future__ import annotations
 
 """Shared project session payload helpers for CLI and web surfaces."""
 
+from . import discover
 from . import resume
 from .session_store import get_store
+
+
+def resolve_project_detail(project_ref: str, limit: int) -> dict | None:
+    """Resolve a project ref and return the same detail payload as `pj show`."""
+    project = discover.resolve_project(project_ref)
+    if project is None:
+        return None
+    return project_session_data(project, limit)
 
 
 def project_session_data(project: dict, limit: int) -> dict:
