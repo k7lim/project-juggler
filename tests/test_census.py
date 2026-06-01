@@ -304,6 +304,31 @@ def test_census_cache_keeps_port_enriched_snapshot_separate():
     assert "live_port_count" not in plain_again["rows"][0]
 
 
+def test_census_cache_rescans_port_enriched_snapshot_each_request():
+    calls = []
+
+    def snapshot_fn(limit, *, include_ports=False):
+        calls.append((limit, include_ports))
+        base_row = {"id": "p1", "state": "active", "category": "sandbox", "origin": "mac"}
+        live_count = len(calls) if include_ports else 0
+        rows = [{**base_row, "live_port_count": live_count}] if include_ports else [base_row]
+        return {"rows": rows, "meta": census.summarize(rows)}
+
+    cache = CensusCache(
+        limit=7,
+        check_interval=60,
+        snapshot_fn=snapshot_fn,
+        signatures_fn=lambda: {"size": 1},
+    )
+
+    first = cache.get(include_ports=True)
+    second = cache.get(include_ports=True)
+
+    assert calls == [(7, True), (7, True)]
+    assert first["rows"][0]["live_port_count"] == 1
+    assert second["rows"][0]["live_port_count"] == 2
+
+
 def test_census_server_include_ports_query_passes_through_to_cache():
     calls = []
 

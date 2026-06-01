@@ -249,6 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ports_p = sub.add_parser("ports", help="Discover local listening TCP ports")
     ports_p.add_argument("--project", help="Filter to project name, path, or ID prefix")
+    ports_p.add_argument("--pretty", action="store_true", help="Human-readable table output")
 
     census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
     census_p.add_argument(
@@ -563,7 +564,10 @@ def _cmd_census(args: argparse.Namespace) -> None:
 
 def _cmd_ports(args: argparse.Namespace) -> None:
     env = runtime_ports.ports(args.project)
-    print(envelope.to_json(env))
+    if args.pretty and env.get("success"):
+        pretty.print_ports(env.get("data", []), env.get("meta", {}))
+    else:
+        print(envelope.to_json(env))
     if not env.get("success"):
         sys.exit(1)
 

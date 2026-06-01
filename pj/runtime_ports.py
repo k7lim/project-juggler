@@ -149,13 +149,24 @@ def parse_proc_net_tcp(output: str, *, source: str = "procfs") -> list[dict]:
     return records
 
 
-def _pid_cwd(pid: int | None) -> str | None:
+def _pid_cwd(pid: int | None, *, runner: CommandRunner = _default_runner) -> str | None:
     if pid is None:
         return None
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError:
+        pass
+
+    try:
+        result = runner(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and line[1:].strip():
+            return line[1:].strip()
+    return None
 
 
 def _is_inside(path: str, parent: str) -> bool:
@@ -261,7 +272,7 @@ def discover_ports(*, project: dict | None = None, projects: list[dict] | None =
 
     normalized: list[dict] = []
     for record in records:
-        record["cwd"] = record.get("cwd") or _pid_cwd(record.get("pid"))
+        record["cwd"] = record.get("cwd") or _pid_cwd(record.get("pid"), runner=runner)
         normalized.append(_associate(record, candidates))
 
     if project is not None:

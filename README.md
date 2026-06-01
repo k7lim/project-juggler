@@ -184,6 +184,7 @@ action.
 
 ```bash
 pj ports                         # JSON array of local runtime port records
+pj ports --pretty                # Human-readable local runtime port table
 pj ports --project myproject      # Filter records to one project query
 pj census --include-ports         # Attach matching port records to census rows
 ```

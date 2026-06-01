@@ -69,6 +69,39 @@ def test_parse_proc_net_tcp_returns_listen_rows_only():
     assert records[0]["source"] == "procfs"
 
 
+def test_pid_cwd_uses_lsof_cwd_when_procfs_is_unavailable():
+    def runner(argv):
+        assert argv == ["lsof", "-a", "-p", "23456", "-d", "cwd", "-Fn"]
+        return subprocess.CompletedProcess(argv, 0, "p23456\nn/work/demo\n", "")
+
+    with mock.patch("pj.runtime_ports.os.readlink", side_effect=OSError):
+        assert runtime_ports._pid_cwd(23456, runner=runner) == "/work/demo"
+
+
+def test_discover_ports_associates_lsof_cwd_inside_project_on_macos():
+    project = {"id": "abc123", "name": "demo", "path": "/work/demo"}
+
+    def runner(argv):
+        if argv[:4] == ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"]:
+            return subprocess.CompletedProcess(argv, 0, LSOF_OUTPUT, "")
+        if argv == ["lsof", "-a", "-p", "12345", "-d", "cwd", "-Fn"]:
+            return subprocess.CompletedProcess(argv, 0, "p12345\nn/work/demo\n", "")
+        if argv == ["lsof", "-a", "-p", "23456", "-d", "cwd", "-Fn"]:
+            return subprocess.CompletedProcess(argv, 0, "p23456\nn/tmp\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "no ss")
+
+    with mock.patch("pj.runtime_ports.os.readlink", side_effect=OSError), \
+         mock.patch("pj.runtime_ports.Path.exists", return_value=False):
+        records, meta = runtime_ports.discover_ports(project=project, runner=runner)
+
+    assert meta["warnings"] == ["ss exited 1: no ss"]
+    assert len(records) == 1
+    assert records[0]["project_id"] == "abc123"
+    assert records[0]["path"] == "/work/demo"
+    assert records[0]["cwd"] == "/work/demo"
+    assert records[0]["confidence"] == "high"
+
+
 def test_discover_ports_associates_cwd_inside_project_as_high_confidence():
     project = {"id": "abc123", "name": "demo", "path": "/work/demo"}
 
@@ -117,6 +150,35 @@ def test_cli_ports_outputs_envelope(capsys):
     ports.assert_called_once_with("demo")
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == payload
+
+
+def test_cli_ports_pretty_outputs_table(capsys):
+    payload = {
+        "success": True,
+        "data": [
+            {
+                "project_id": "abc123",
+                "path": "/work/demo",
+                "live_urls": ["http://127.0.0.1:3000/"],
+                "pid": 12345,
+                "port": 3000,
+                "host": "127.0.0.1",
+                "command": "node",
+                "cwd": "/work/demo",
+                "confidence": "high",
+                "source": "lsof",
+            }
+        ],
+        "meta": {"total": 1, "sources": ["lsof"], "warnings": []},
+    }
+    with mock.patch("pj.cli.runtime_ports.ports", return_value=payload) as ports:
+        cli.main(["ports", "--project", "demo", "--pretty"])
+
+    ports.assert_called_once_with("demo")
+    out = capsys.readouterr().out
+    assert "PORT" in out
+    assert "demo" in out
+    assert "http://127.0.0.1:3000/" in out
 
 
 def test_cli_ports_exits_nonzero_on_error(capsys):

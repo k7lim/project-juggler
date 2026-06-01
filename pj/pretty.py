@@ -391,6 +391,51 @@ def print_next(scored: list[dict]) -> None:
         print("  ".join(row))
 
 
+def print_ports(records: list[dict], meta: dict | None = None) -> None:
+    meta = meta or {}
+    if not records:
+        project = meta.get("project") or {}
+        suffix = f" for {project.get('name')}" if project.get("name") else ""
+        print(f"No live ports found{suffix}.")
+        warnings = meta.get("warnings") or []
+        if warnings:
+            print(f"Warnings: {'; '.join(str(w) for w in warnings)}")
+        return
+
+    cols = [
+        ("PORT", 5),
+        ("HOST", 15),
+        ("CONF", 8),
+        ("PROJECT", 24),
+        ("SOURCE", 8),
+        ("URL", 32),
+    ]
+    header = "  ".join(_c("1", h.ljust(w)) for h, w in cols)
+    sep_len = sum(w for _, w in cols) + 2 * (len(cols) - 1)
+    print(header)
+    print("-" * sep_len)
+
+    for record in records:
+        urls = record.get("live_urls") or []
+        url = str(urls[0]) if urls else ""
+        project = record.get("path") or record.get("project_id") or ""
+        if project:
+            project = str(project).rstrip("/").split("/")[-1]
+        row = [
+            str(record.get("port") or "").rjust(5),
+            _pad(str(record.get("host") or "")[:15], 15),
+            _pad(str(record.get("confidence") or "")[:8], 8),
+            _pad(str(project)[:24], 24),
+            _pad(str(record.get("source") or "")[:8], 8),
+            url[:32].ljust(32),
+        ]
+        print("  ".join(row))
+
+    warnings = meta.get("warnings") or []
+    if warnings:
+        print(f"\nWarnings: {'; '.join(str(w) for w in warnings)}")
+
+
 def print_search(results: list[dict], query: str | list[str], regex: bool = False) -> None:
     from . import resume as resume_mod
     from . import search as search_mod

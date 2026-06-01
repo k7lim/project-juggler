@@ -979,11 +979,11 @@ class CensusCache:
             signature_changed = False
             checked = False
 
-            if force or include_ports not in self._snapshots or now >= self._next_check:
+            if force or include_ports or include_ports not in self._snapshots or now >= self._next_check:
                 checked = True
                 signature = self.signatures_fn()
                 signature_changed = signature != self._signature
-                if force or include_ports not in self._snapshots or signature_changed:
+                if force or include_ports or include_ports not in self._snapshots or signature_changed:
                     if signature_changed:
                         self._snapshots.clear()
                     started = time.monotonic()
