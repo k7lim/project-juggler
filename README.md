@@ -146,6 +146,43 @@ pj census stop               # Graceful shutdown via local control endpoint
 structured JSON, the server metadata is stored under `PJ_DATA_DIR`, and `stop`
 uses a per-process local control token instead of parsing logs or guessing ports.
 
+#### Census web API contract
+
+The census server is a local, stdlib-only HTTP wrapper around the CLI-first
+JSON contract. Every API response is an envelope:
+
+```json
+{
+  "success": true,
+  "data": {},
+  "meta": {}
+}
+```
+
+Errors use the same envelope shape with `"success": false`, an empty `data`
+array, and `meta.error`.
+
+Read endpoints:
+
+| Endpoint | CLI equivalent | Data shape | Metadata |
+|----------|----------------|------------|----------|
+| `GET /api/health` | `pj census status` health check | `{ "status": "running" }` | none |
+| `GET /api/census?refresh=1` | `pj census` | array of normalized census rows | census summary fields such as `total`, `state_counts`, `category_counts`, `origin_counts`, `session_total`, `duration_hrs_total`, `generated_at` |
+| `GET /api/search?q=term&q=other&limit=20&sort=newest&project=name&match=any&regex=0` | `pj search ...` | array of project search matches | `query`, `project`, `match`, `regex`, `sort`, `total`, `limit`, `latency_ms`, optional `hint` |
+| `GET /api/show?project=name-or-id&sessions=10` | `pj show <project>` | project object with `sessions` and `resume_cmd` | `latency_ms` |
+| `GET /api/chats?project=name-or-id&limit=20` | `pj chats <project>` | array of session summaries | `project`, `total`, `limit`, `latency_ms` |
+| `GET /api/chat/<session_id>?no_tools=1&roles=user,assistant&all_branches=0&last=10&offset=0&limit=5` | `pj chat <session_id>` | session object with paginated `messages` | `total_messages`, `offset`, `limit`, `latency_ms` |
+
+Annotation endpoints append events through `pj.annotate`; they never rewrite
+annotation state directly:
+
+| Endpoint | CLI equivalent | JSON body |
+|----------|----------------|-----------|
+| `POST /api/annotations/note` | `pj note <project> <text>` | `{ "project": "name-or-id-or-path", "text": "next step" }` |
+| `POST /api/annotations/prioritize` | `pj prioritize <project> <level>` | `{ "project": "name-or-id-or-path", "level": "high" }` |
+| `POST /api/annotations/tag` | `pj tag <project> <tag>` | `{ "project": "name-or-id-or-path", "tag": "backend" }` |
+| `POST /api/annotations/archive` | `pj archive <project>` | `{ "project": "name-or-id-or-path" }` |
+
 ### `pj show` - Deep dive into a project
 
 ```bash

@@ -9,9 +9,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import cache, census, envelope
+from . import annotate, cache, census, discover, envelope
+from . import search as search_mod
+from .project_sessions import project_session_data
+from .session_store import get_store
 
 
 HTML = """<!DOCTYPE html>
@@ -369,6 +372,28 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
                 self._send_text(body, "application/json; charset=utf-8")
                 return
 
+            if parsed.path == "/api/search":
+                self._handle_api_get(self._handle_search, parse_qs(parsed.query))
+                return
+
+            if parsed.path == "/api/show":
+                self._handle_api_get(self._handle_show, parse_qs(parsed.query))
+                return
+
+            if parsed.path == "/api/chats":
+                self._handle_api_get(self._handle_chats, parse_qs(parsed.query))
+                return
+
+            if parsed.path == "/api/chat":
+                self._handle_api_get(self._handle_chat, parse_qs(parsed.query))
+                return
+
+            if parsed.path.startswith("/api/chat/"):
+                params = parse_qs(parsed.query)
+                params["session_id"] = [unquote(parsed.path.removeprefix("/api/chat/"))]
+                self._handle_api_get(self._handle_chat, params)
+                return
+
             self.send_error(404)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
@@ -384,21 +409,223 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
+            if parsed.path.startswith("/api/annotations/"):
+                self._handle_annotation(parsed.path.removeprefix("/api/annotations/"))
+                return
+
             self.send_error(404)
 
         def log_message(self, fmt: str, *args: object) -> None:
             print(f"{self.address_string()} - {fmt % args}", file=sys.stderr)
 
-        def _send_text(self, body: str, content_type: str) -> None:
+        def _send_text(self, body: str, content_type: str, *, status: int = 200) -> None:
             data = body.encode("utf-8")
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_json(self, payload: dict, *, status: int = 200) -> None:
+            self._send_text(envelope.to_json(payload), "application/json; charset=utf-8", status=status)
+
+        def _handle_api_get(self, handler: Callable[[dict[str, list[str]]], None], params: dict[str, list[str]]) -> None:
+            try:
+                handler(params)
+            except ValueError as exc:
+                self._send_json(envelope.err(str(exc), source="request"), status=400)
+
+        def _handle_search(self, params: dict[str, list[str]]) -> None:
+            query = params.get("q") or params.get("query") or []
+            if not query:
+                self._send_json(envelope.err("Missing required query parameter: q", source="search"), status=400)
+                return
+            try:
+                started = time.monotonic()
+                results = search_mod.search(
+                    query,
+                    limit=_int_param(params, "limit", 20),
+                    sort=_str_param(params, "sort", "newest"),
+                    project=_optional_str_param(params, "project"),
+                    match=_str_param(params, "match", "any"),
+                    regex=_bool_param(params, "regex", False),
+                )
+            except ValueError as exc:
+                self._send_json(envelope.err(str(exc), source="search"), status=400)
+                return
+            latency_ms = int((time.monotonic() - started) * 1000)
+            hint = None
+            regex = _bool_param(params, "regex", False)
+            if not results and not regex and search_mod.looks_like_regex(query):
+                hint = search_mod.regex_hint(query)
+            self._send_json(
+                envelope.ok(
+                    results,
+                    query=query,
+                    project=_optional_str_param(params, "project"),
+                    match=_str_param(params, "match", "any"),
+                    regex=regex,
+                    sort=_str_param(params, "sort", "newest"),
+                    total=len(results),
+                    limit=_int_param(params, "limit", 20),
+                    latency_ms=latency_ms,
+                    **({"hint": hint} if hint else {}),
+                )
+            )
+
+        def _handle_show(self, params: dict[str, list[str]]) -> None:
+            project_ref = _optional_str_param(params, "project")
+            if not project_ref:
+                self._send_json(envelope.err("Missing required query parameter: project", source="show"), status=400)
+                return
+            project = discover.resolve_project(project_ref)
+            if project is None:
+                self._send_json(envelope.err(f"No project matching {project_ref!r}", source="show"), status=404)
+                return
+            started = time.monotonic()
+            data = project_session_data(project, _int_param(params, "sessions", 10))
+            self._send_json(envelope.ok(data, latency_ms=int((time.monotonic() - started) * 1000)))
+
+        def _handle_chats(self, params: dict[str, list[str]]) -> None:
+            project_ref = _optional_str_param(params, "project")
+            if not project_ref:
+                self._send_json(envelope.err("Missing required query parameter: project", source="chats"), status=400)
+                return
+            project = discover.resolve_project(project_ref)
+            if project is None:
+                self._send_json(envelope.err(f"No project matching {project_ref!r}", source="chats"), status=404)
+                return
+            started = time.monotonic()
+            limit = _int_param(params, "limit", 20)
+            status_data = project_session_data(project, limit)
+            sessions = status_data["sessions"]
+            self._send_json(
+                envelope.ok(
+                    sessions,
+                    project={"id": project.get("id"), "name": project.get("name"), "path": project.get("path")},
+                    total=len(sessions),
+                    limit=limit,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+
+        def _handle_chat(self, params: dict[str, list[str]]) -> None:
+            session_id = _optional_str_param(params, "session_id")
+            if not session_id:
+                self._send_json(envelope.err("Missing required query parameter: session_id", source="chat"), status=400)
+                return
+            started = time.monotonic()
+            roles = _optional_str_param(params, "roles")
+            result = get_store().get_session(
+                session_id,
+                all_branches=_bool_param(params, "all_branches", False),
+                include_tools=not _bool_param(params, "no_tools", False),
+                roles=set(roles.split(",")) if roles else None,
+            )
+            if result is None:
+                self._send_json(envelope.err(f"Session {session_id!r} not found", source="chat"), status=404)
+                return
+
+            messages = result["messages"]
+            last = _optional_int_param(params, "last")
+            if last is not None:
+                messages = messages[-last:]
+            total = len(messages)
+            offset = _int_param(params, "offset", 0)
+            messages = messages[offset:]
+            limit = _optional_int_param(params, "limit")
+            if limit is not None:
+                messages = messages[:limit]
+            result["messages"] = messages
+
+            self._send_json(
+                envelope.ok(
+                    result,
+                    total_messages=total,
+                    offset=offset,
+                    limit=limit,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+
+        def _handle_annotation(self, action: str) -> None:
+            try:
+                payload = self._read_json_body()
+                project_ref = payload.get("project")
+                if not isinstance(project_ref, str) or not project_ref:
+                    self._send_json(
+                        envelope.err("Missing required JSON field: project", source="annotations"),
+                        status=400,
+                    )
+                    return
+                project_path = _annotation_project_path(project_ref)
+                started = time.monotonic()
+                if action == "note":
+                    text = payload.get("text")
+                    if not isinstance(text, str) or not text:
+                        raise ValueError("Missing required JSON field: text")
+                    event = annotate.note(project_path, text)
+                elif action == "prioritize":
+                    level = payload.get("level")
+                    if not isinstance(level, str) or not level:
+                        raise ValueError("Missing required JSON field: level")
+                    event = annotate.prioritize(project_path, level)
+                elif action == "tag":
+                    tag_name = payload.get("tag")
+                    if not isinstance(tag_name, str) or not tag_name:
+                        raise ValueError("Missing required JSON field: tag")
+                    event = annotate.tag(project_path, tag_name)
+                elif action == "archive":
+                    event = annotate.archive(project_path)
+                else:
+                    self._send_json(envelope.err(f"Unknown annotation action: {action}", source="annotations"), status=404)
+                    return
+            except (json.JSONDecodeError, ValueError) as exc:
+                self._send_json(envelope.err(str(exc), source="annotations"), status=400)
+                return
+
+            self._send_json(envelope.ok(event, latency_ms=int((time.monotonic() - started) * 1000)))
+
+        def _read_json_body(self) -> dict:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0:
+                return {}
+            data = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(data)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
+
     return Handler
+
+
+def _annotation_project_path(project_ref: str) -> str:
+    project = discover.resolve_project(project_ref)
+    return project["path"] if project else project_ref
+
+
+def _str_param(params: dict[str, list[str]], name: str, default: str) -> str:
+    return params.get(name, [default])[0]
+
+
+def _optional_str_param(params: dict[str, list[str]], name: str) -> str | None:
+    value = params.get(name, [None])[0]
+    return value or None
+
+
+def _int_param(params: dict[str, list[str]], name: str, default: int) -> int:
+    return int(params.get(name, [str(default)])[0])
+
+
+def _optional_int_param(params: dict[str, list[str]], name: str) -> int | None:
+    value = params.get(name, [None])[0]
+    return int(value) if value not in (None, "") else None
+
+
+def _bool_param(params: dict[str, list[str]], name: str, default: bool) -> bool:
+    value = params.get(name, [str(int(default))])[0].lower()
+    return value in ("1", "true", "yes", "on")
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765, *, limit: int = 10000, check_interval: int = 60) -> None:

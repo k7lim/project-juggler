@@ -1,11 +1,43 @@
 from __future__ import annotations
 
 import json
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
+from http.server import ThreadingHTTPServer
 from unittest import mock
 
 from pj import census, census_process, cli
-from pj.census_server import CensusCache
+from pj.census_server import CensusCache, make_handler
+
+
+def _api_request(server, path, *, method="GET", body=None):
+    url = f"http://127.0.0.1:{server.server_address[1]}{path}"
+    data = None
+    headers = {}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _test_server():
+    cache = CensusCache(
+        limit=7,
+        check_interval=0,
+        snapshot_fn=lambda limit: {"rows": [], "meta": census.summarize([])},
+        signatures_fn=lambda: {},
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(cache))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
 
 
 def test_normalize_project_maps_detail_fields(tmp_path):
@@ -120,6 +152,128 @@ def test_census_cache_refreshes_only_when_signatures_change():
     assert second["meta"]["signature_changed"] is False
     assert third["meta"]["signature_changed"] is True
     assert calls == [7, 7]
+
+
+def test_census_server_search_endpoint_maps_cli_query_semantics():
+    server, thread = _test_server()
+    try:
+        with mock.patch(
+            "pj.census_server.search_mod.search",
+            return_value=[{"id": "p1", "name": "sports", "path": "/tmp/sports"}],
+        ) as search:
+            status, payload = _api_request(
+                server,
+                "/api/search?q=sport&q=soccer&limit=3&sort=relevance&project=league&match=all&regex=1",
+            )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert status == 200
+    search.assert_called_once_with(
+        ["sport", "soccer"],
+        limit=3,
+        sort="relevance",
+        project="league",
+        match="all",
+        regex=True,
+    )
+    assert payload["success"] is True
+    assert payload["data"][0]["name"] == "sports"
+    assert payload["meta"]["query"] == ["sport", "soccer"]
+    assert payload["meta"]["total"] == 1
+
+
+def test_census_server_show_chats_and_chat_endpoints_map_to_session_store():
+    project = {"id": "abc123", "name": "proj", "path": "/tmp/proj", "agent": "codex"}
+    sessions = [{"session_id": "sess-1", "agent": "codex", "title": "Build API"}]
+    store = mock.Mock()
+    store.project_sessions.return_value = [dict(sessions[0])]
+    store.session_details.return_value = {"sess-1": {"models": ["gpt-5"], "versions": ["0.2.2"]}}
+    store.get_session.return_value = {
+        "session_id": "sess-1",
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+        ],
+    }
+
+    server, thread = _test_server()
+    try:
+        with mock.patch("pj.census_server.discover.resolve_project", return_value=project), \
+             mock.patch("pj.project_sessions.get_store", return_value=store), \
+             mock.patch("pj.census_server.get_store", return_value=store):
+            show_status, show_payload = _api_request(server, "/api/show?project=abc&sessions=1")
+            chats_status, chats_payload = _api_request(server, "/api/chats?project=abc&limit=1")
+            chat_status, chat_payload = _api_request(
+                server,
+                "/api/chat/sess-1?roles=user,assistant&no_tools=1&last=2&offset=1&limit=1",
+            )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert show_status == 200
+    assert show_payload["data"]["path"] == "/tmp/proj"
+    assert show_payload["data"]["sessions"][0]["models"] == ["gpt-5"]
+    assert show_payload["data"]["resume_cmd"] == "cd /tmp/proj && codex resume sess-1"
+
+    assert chats_status == 200
+    assert chats_payload["data"][0]["session_id"] == "sess-1"
+    assert chats_payload["meta"]["project"] == {"id": "abc123", "name": "proj", "path": "/tmp/proj"}
+    assert chats_payload["meta"]["total"] == 1
+
+    assert chat_status == 200
+    store.get_session.assert_called_once_with(
+        "sess-1",
+        all_branches=False,
+        include_tools=False,
+        roles={"user", "assistant"},
+    )
+    assert chat_payload["data"]["messages"] == [{"role": "user", "content": "third"}]
+    assert chat_payload["meta"]["total_messages"] == 2
+    assert chat_payload["meta"]["offset"] == 1
+    assert chat_payload["meta"]["limit"] == 1
+
+
+def test_census_server_annotation_endpoints_append_only_via_annotate_api(tmp_path):
+    ann_path = tmp_path / "annotations.jsonl"
+    project = {"id": "abc123", "name": "proj", "path": "/tmp/proj"}
+
+    server, thread = _test_server()
+    try:
+        with mock.patch("pj.annotate.annotations_path", return_value=ann_path), \
+             mock.patch("pj.census_server.discover.resolve_project", return_value=project):
+            note_status, note_payload = _api_request(
+                server,
+                "/api/annotations/note",
+                method="POST",
+                body={"project": "abc", "text": "next: document API"},
+            )
+            priority_status, priority_payload = _api_request(
+                server,
+                "/api/annotations/prioritize",
+                method="POST",
+                body={"project": "abc", "level": "high"},
+            )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert note_status == 200
+    assert note_payload["data"]["type"] == "note"
+    assert note_payload["data"]["project_path"] == "/tmp/proj"
+    assert priority_status == 200
+    assert priority_payload["data"]["type"] == "priority"
+
+    lines = ann_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["text"] == "next: document API"
+    assert json.loads(lines[1])["value"] == "high"
 
 
 def test_cli_census_outputs_dashboard_json(capsys):

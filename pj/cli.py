@@ -7,6 +7,7 @@ import time
 from . import __version__
 from . import annotate, discover, envelope, pretty, resume, schedule
 from . import search as search_mod
+from .project_sessions import project_session_data
 from .session_store import get_store
 
 SEARCH_HELP = """\
@@ -288,28 +289,6 @@ def _resolve_project_arg(project: str | None, *, here: bool = False, source: str
     return resolved
 
 
-def _project_session_data(project: dict, limit: int) -> dict:
-    sessions = get_store().project_sessions(project["path"], limit=limit)
-    resume_cmd = None
-    if sessions:
-        latest = sessions[0]
-        resume_cmd = resume.full_resume_command(
-            project["path"], latest["agent"], latest["session_id"],
-        )
-        sids = [s["session_id"] for s in sessions]
-        details = get_store().session_details(sids)
-        for s in sessions:
-            d = details.get(s["session_id"], {})
-            s["versions"] = d.get("versions", [])
-            s["models"] = d.get("models", [])
-
-    return {
-        **project,
-        "sessions": sessions,
-        "resume_cmd": resume_cmd,
-    }
-
-
 def _cmd_list(args: argparse.Namespace) -> None:
     start = time.monotonic()
     projects, total = discover.discover(
@@ -359,7 +338,7 @@ def _cmd_show(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
         sys.exit(1)
 
-    status_data = _project_session_data(project, args.sessions)
+    status_data = project_session_data(project, args.sessions)
     latency_ms = int((time.monotonic() - start) * 1000)
 
     if args.pretty:
@@ -372,7 +351,7 @@ def _cmd_show(args: argparse.Namespace) -> None:
 def _cmd_chats(args: argparse.Namespace) -> None:
     start = time.monotonic()
     project = _resolve_project_arg(args.project, here=args.here, source="chats")
-    status_data = _project_session_data(project, args.limit)
+    status_data = project_session_data(project, args.limit)
     sessions = status_data["sessions"]
     latency_ms = int((time.monotonic() - start) * 1000)
 
