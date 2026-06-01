@@ -136,6 +136,7 @@ or manage it as a background process:
 
 ```bash
 pj census                    # JSON census snapshot
+pj census --include-ports    # JSON census snapshot with local runtime ports
 pj census serve              # Foreground web server
 pj census start              # Background web server
 pj census status             # JSON status: pid, URL, health, state/log files
@@ -145,6 +146,79 @@ pj census stop               # Graceful shutdown via local control endpoint
 `pj census start/status/stop` are designed for both humans and agents: output is
 structured JSON, the server metadata is stored under `PJ_DATA_DIR`, and `stop`
 uses a per-process local control token instead of parsing logs or guessing ports.
+
+### `pj ports` - Local runtime port discovery
+
+`pj ports` reports local development servers and other runtime ports that can be
+associated with discovered projects. It is a CLI-first contract; any web API or
+dashboard view must reuse the same discovery behavior and response fields rather
+than adding browser-only behavior.
+
+```bash
+pj ports                         # JSON array of local runtime port records
+pj ports --project myproject      # Filter records to one project query
+pj census --include-ports         # Attach matching port records to census rows
+```
+
+All JSON output uses the standard envelope:
+
+```json
+{
+  "success": true,
+  "data": [],
+  "meta": {}
+}
+```
+
+`pj ports` returns one record per discovered local runtime endpoint in `data`.
+Readers must ignore unknown fields so the contract can grow without breaking
+older clients.
+
+Port record fields:
+
+| Field | Meaning |
+|-------|---------|
+| `project_id` | Matched project identifier when a project can be associated with the port; otherwise `null`. |
+| `path` | Matched project path when available; otherwise `null`. |
+| `live_urls` | Array of usable local URLs for the endpoint, such as `http://127.0.0.1:3000/`. |
+| `pid` | Owning process ID when the platform can report it; otherwise `null`. |
+| `port` | Numeric TCP port. |
+| `host` | Bound host or address when available; otherwise a best-effort local host such as `127.0.0.1` or `localhost`. |
+| `command` | Process command line or executable name when available; otherwise `null`. |
+| `cwd` | Process working directory when available; otherwise `null`. |
+| `confidence` | Match confidence: `high`, `medium`, `low`, or `unknown`. |
+| `source` | Discovery source, for example `lsof`, `netstat`, `ss`, `procfs`, or `unknown`. |
+
+Confidence levels describe the project association, not whether the port is
+open:
+
+| Confidence | Meaning |
+|------------|---------|
+| `high` | Process `cwd` is inside a discovered project or otherwise maps directly to a known project path. |
+| `medium` | Command, environment, or path evidence points to a project but does not prove the runtime directory. |
+| `low` | The port is live and has weak project evidence, such as a name-only match. |
+| `unknown` | The port is live but cannot be associated with a project. |
+
+`pj ports --project <query>` applies the same project query semantics as other
+project commands: name, id, or path-like query. If the query does not match a
+known project, the command returns `"success": false`, `data: []`, and
+`meta.error`. If the query matches a project but no runtime ports are found, it
+returns `"success": true` with empty `data`.
+
+Platform support is best effort and stdlib-compatible from pj's side. Discovery
+may use platform tools when available, but missing tools, permission limits, or
+unsupported process metadata must degrade by returning `null` fields or lower
+confidence instead of failing the whole command. A command failure is reserved
+for invalid arguments, unreadable project state, or an unexpected discovery
+error; partial discovery failures should be reported in `meta.warnings` when
+practical.
+
+`pj census --include-ports` keeps census rows as the primary data shape and adds
+port information without changing the default `pj census` contract. Each census
+row may include a `ports` array containing the same port records returned by
+`pj ports --project <query>`, and census metadata may include
+`ports_included: true`, `ports_total`, and `ports_sources`. Readers must ignore
+unknown census row fields and unknown port record fields.
 
 #### Census web API contract
 
@@ -168,6 +242,8 @@ Read endpoints:
 |----------|----------------|------------|----------|
 | `GET /api/health` | `pj census status` health check | `{ "status": "running" }` | none |
 | `GET /api/census?refresh=1` | `pj census` | array of normalized census rows | census summary fields such as `total`, `state_counts`, `category_counts`, `origin_counts`, `session_total`, `duration_hrs_total`, `generated_at` |
+| `GET /api/census?refresh=1&include_ports=1` | `pj census --include-ports` | array of normalized census rows with optional `ports` arrays | census summary fields plus optional `ports_included`, `ports_total`, `ports_sources`, and `warnings` |
+| `GET /api/ports?project=name-or-id-or-path` | `pj ports [--project <query>]` | array of port records | `total`, optional `project`, `sources`, `warnings`, `latency_ms` |
 | `GET /api/search?q=term&q=other&limit=20&sort=newest&project=name&match=any&regex=0` | `pj search ...` | array of project search matches | `query`, `project`, `match`, `regex`, `sort`, `total`, `limit`, `latency_ms`, optional `hint` |
 | `GET /api/show?project=name-or-id&sessions=10` | `pj show <project>` | project object with `sessions` and `resume_cmd` | `latency_ms` |
 | `GET /api/chats?project=name-or-id&limit=20` | `pj chats <project>` | array of session summaries | `project`, `total`, `limit`, `latency_ms` |
