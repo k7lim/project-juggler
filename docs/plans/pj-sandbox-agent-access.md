@@ -126,6 +126,7 @@ Read commands should choose their backend at the boundary:
 | `pj show` | current local project detail implementation | call `GET /api/show` |
 | `pj chats` | current local session listing implementation | call `GET /api/chats` |
 | `pj chat` | current local session rendering implementation | call `GET /api/chat/<session_id>` |
+| `pj next` | current local scheduling implementation | call `GET /api/next` |
 
 `PJ_REMOTE_URL` should affect read commands only. Actuators should stay local
 until there is an explicit remote-write design with dry-run and auth.
@@ -136,6 +137,7 @@ Use the existing census server as the host read service. It already exposes the
 needed read endpoints:
 
 - `GET /api/health`
+- `GET /api/next?limit=5`
 - `GET /api/search?q=term&q=other&limit=20&sort=newest&project=name&match=any&regex=0`
 - `GET /api/show?project=name-or-id&sessions=10`
 - `GET /api/chats?project=name-or-id&limit=20`
@@ -156,10 +158,16 @@ export PJ_REMOTE_URL=http://host.docker.internal:8765
 
 ## Security and Safety Rails
 
-Before documenting `--host 0.0.0.0` as a normal workflow, add read auth:
+Before documenting `--host 0.0.0.0` as a normal workflow, define and implement a
+remote exposure policy. This is now more than read auth: the census server also
+has annotation POST endpoints, so non-loopback serving must not silently expose
+actuators.
 
-- server reads `PJ_READ_TOKEN`
-- client reads `PJ_REMOTE_TOKEN`
+Likely shape:
+
+- server reads a read token such as `PJ_READ_TOKEN`
+- server may read a separate write token such as `PJ_WRITE_TOKEN`
+- client reads `PJ_REMOTE_TOKEN` for read calls
 - client sends `Authorization: Bearer <token>`
 - if no server token is configured, keep loopback-only usage as the safe default
 
@@ -170,8 +178,9 @@ Input validation should live at the CLI/API boundary:
 - keep query strings as query values, not pre-encoded user input
 - preserve the existing envelope shape for success and error responses
 
-Mutation endpoints already exist on the census server for annotations, but they
-should not be part of the sandbox-agent contract yet.
+Mutation endpoints already exist on the census server for annotations. They
+should not be part of the sandbox-agent contract unless a separate remote-write
+policy is intentionally designed and implemented.
 
 ## Output and Context Discipline
 
@@ -193,166 +202,797 @@ Remote mode should also support the same context-window controls as local mode:
 
 ## Implementation Order
 
-1. Add the project-juggler skill file with the sensor/actuator contract.
-2. Add `pj health` with the standard envelope.
-3. Add a tiny remote HTTP client facade used only when `PJ_REMOTE_URL` is set.
-4. Route `search`, `show`, `chats`, and `chat` through that facade in remote mode.
-5. Add read-token support for the census server and remote client.
+1. Decide remote exposure/auth policy, skill packaging, and `/api/ports`
+   contract.
+2. Add the project-juggler skill file with the sensor/actuator contract.
+3. Add `pj health` with the standard envelope and a health-only remote path.
+4. Add the remote exposure/auth policy for the census server and remote client.
+5. Route `search`, `show`, `chats`, `chat`, and `next` through remote mode as
+   separate vertical slices.
 6. Add docs for host setup and sandbox setup.
 7. Later: add `pj schema` or `pj --describe` for runtime introspection.
 
-## Proposed Tickets
+## Ambiguity Flattening
 
-These are intended as independently grabbable tracer bullets. Prefer creating
-them in this order so dependency edges point at real issue IDs.
+The task graph below intentionally does not ask implementation agents to make
+product or architecture decisions. It turns the remaining choices into explicit
+HITL decision tasks:
 
-### 1. Update Sandbox-Agent Access Plan for Current Web API
+- Remote exposure policy: the same census server now has read endpoints and
+  annotation write endpoints, so non-loopback serving needs a formal auth/write
+  policy before it is documented as normal.
+- Skill packaging: the plan needs a chosen location and distribution mechanism
+  before an AFK agent can add a usable skill without guessing.
+- `/api/ports` contract: README documents `GET /api/ports`, while the current
+  server exposes port data through `GET /api/census?include_ports=1`; choose
+  implement-versus-defer before assigning the code/doc alignment task.
+
+This graph assumes remote mode is explicit through `PJ_REMOTE_URL`; automatic
+`host.docker.internal` probing is out of scope for the first implementation.
+It also assumes field selection is deferred; first-pass context control uses
+existing `limit`, `offset`, `last`, `no_tools`, and `roles` parameters.
+
+## Task Breakdown
+
+The following tasks are written for conversion into tracker issues. Each task is
+atomic, independently verifiable, and includes enough onboarding for an agent
+with no prior conversation context.
+
+### Task A: Decide Remote Exposure and Auth Policy
+
+Type: HITL
+
+#### Objective
+
+Choose and record the security policy for using the census server as a host-side
+service reachable from disposable Docker/yolobox sandboxes. The decision must
+cover reads, annotation writes, control endpoints, token names, and behavior for
+non-loopback binds.
+
+#### Context
+
+- Source: `docs/plans/pj-sandbox-agent-access.md#security-and-safety-rails`
+- Files:
+  - `pj/census_server.py` - current HTTP routes and unauthenticated annotation
+    POST handling
+  - `pj/census_process.py` - background server lifecycle and control token
+    handling
+  - `README.md` - documented web API contract and web UX maintenance rules
+  - `tests/test_census.py` - existing endpoint tests
+- Discovery:
+  - `rg "PJ_CENSUS_CONTROL_TOKEN|annotations|do_POST|do_GET" pj/census_server.py pj/census_process.py`
+  - `rg "GET /api|POST /api|web API contract|annotations" README.md`
+  - `rg "annotation|control|health|search endpoint" tests/test_census.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Decide whether all non-loopback serving requires auth.
+- Decide whether reads and writes use separate tokens.
+- Decide whether annotation writes are disabled remotely by default or gated.
+- Decide how unsafe `pj census serve/start --host 0.0.0.0` behaves.
+
+Out:
+- Implementing the policy in code.
+- Designing remote annotation writes beyond the minimum safe exposure rule.
+
+#### Acceptance Criteria
+
+- [ ] The decision is written into this plan or a linked ADR/decision section.
+- [ ] Token names and header format are specified.
+- [ ] Loopback versus non-loopback behavior is specified.
+- [ ] Annotation write behavior is specified separately from read behavior.
+- [ ] Downstream implementation tasks no longer need to choose a security model.
+
+#### Testing
+
+- Documentation-only task; no test command required.
+- Optional sanity check: `rg "PJ_READ_TOKEN|PJ_WRITE_TOKEN|Authorization|non-loopback" docs README.md`
+
+#### Dependencies
+
+- Blocked by: None - can start immediately.
+- Blocks: Tasks C, E, and F.
+
+#### Notes
+
+The current control endpoint already uses `PJ_CENSUS_CONTROL_TOKEN`; do not
+weaken that path. Treat browser, sandbox-agent, and user input as untrusted at
+the HTTP boundary.
+
+### Task B: Decide Skill Location and Distribution
+
+Type: HITL
+
+#### Objective
+
+Choose where the project-juggler agent skill should live and how it should be
+installed or discovered. The decision must let an implementation agent add the
+skill without inventing project-specific packaging conventions.
+
+#### Context
+
+- Source: `docs/plans/pj-sandbox-agent-access.md#agent-skill-contract`
+- Files:
+  - `README.md` - user-facing install and command documentation
+  - `AGENTS.md` - project-local agent instructions
+  - `docs/plans/pj-sandbox-agent-access.md` - draft skill contract
+- Discovery:
+  - `rg "SKILL.md|skill|AGENTS.md|project-juggler" . README.md docs`
+  - `rg --files | rg "(SKILL.md|skills|AGENTS.md)$"`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Choose one skill location and distribution path.
+- State whether the skill is project-local docs only, a packaged Codex skill, or
+  both.
+- State any required frontmatter/name constraints.
+
+Out:
+- Writing the skill content.
+- Implementing installer or marketplace behavior.
+
+#### Acceptance Criteria
+
+- [ ] The chosen skill path is written down.
+- [ ] The chosen distribution/install expectation is written down.
+- [ ] The decision says whether `AGENTS.md` should reference the skill.
+- [ ] Downstream skill implementation does not need to choose a location.
+
+#### Testing
+
+- Documentation-only task; no test command required.
+- Optional sanity check: `rg "project-juggler|SKILL.md|skills/" docs README.md AGENTS.md`
+
+#### Dependencies
+
+- Blocked by: None - can start immediately.
+- Blocks: Task C.
+
+#### Notes
+
+If using a packaged Codex skill, follow the local skill structure conventions:
+frontmatter with `name` and `description`, concise `SKILL.md`, optional
+resources only when needed.
+
+### Task C: Add Project-Juggler Agent Skill
 
 Type: AFK
 
-Blocked by: None
+#### Objective
 
-What to build: Revise this plan after the current web API lands so it reflects
-`/api/next`, annotation endpoint exposure, and the `/api/ports` documentation
-versus route mismatch.
+Add the project-juggler agent skill at the location chosen in Task B. The skill
+must teach agents how to use `pj` as a sensor, how to detect/use host-backed
+remote reads from a sandbox, and which commands are actuators requiring explicit
+user intent.
 
-Acceptance criteria:
+#### Context
 
-- [ ] `GET /api/next` is listed as a remote sensor candidate.
-- [ ] Annotation writes are called out as real actuators on the same server.
-- [ ] The `/api/ports` mismatch is either resolved or explicitly deferred.
+- Source: `docs/plans/pj-sandbox-agent-access.md#agent-skill-contract`
+- Files:
+  - file/path chosen by Task B - final skill location
+  - `docs/plans/pj-sandbox-agent-access.md` - source contract and sandbox
+    workflow
+  - `README.md` - current CLI and web API behavior
+  - `pj/cli.py` - current command names and flags
+- Discovery:
+  - `rg "pj search|pj show|pj chats|pj chat|pj next|pj ports" README.md pj/cli.py`
+  - `rg "PJ_REMOTE_URL|PJ_REMOTE_TOKEN|PJ_READ_TOKEN|PJ_WRITE_TOKEN" docs README.md pj`
+  - `rg "note|tag|prioritize|archive" README.md pj/cli.py pj/annotate.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
 
-### 2. Add Project-Juggler Agent Skill
+#### Scope
+
+In:
+- Skill frontmatter and concise body.
+- Sensor list: `search`, `show`, `chats`, `chat`, `next`, and optionally
+  `ports` once Task D/Task G resolves the contract.
+- Actuator list: `note`, `tag`, `prioritize`, `archive`.
+- Sandbox workflow using explicit `PJ_REMOTE_URL`.
+
+Out:
+- CLI implementation changes.
+- Remote server auth implementation.
+- Long tutorial docs duplicating README.
+
+#### Acceptance Criteria
+
+- [ ] Skill identifies read sensors and annotation actuators.
+- [ ] Skill tells agents to prefer JSON envelopes and reserve `--pretty` for
+      human-facing output.
+- [ ] Skill explains that local sandbox `pj` may not see host chat history.
+- [ ] Skill shows `PJ_REMOTE_URL=http://host.docker.internal:8765`.
+- [ ] Skill reflects the auth/token names chosen in Task A if those decisions
+      are available.
+
+#### Testing
+
+- Documentation-only focused validation: `rg "PJ_REMOTE_URL|host.docker.internal|Actuators|Sensors" <skill-path>`
+- Broader validation: `python3 -m pytest tests/test_pj.py::test_cli_search_help_teaches_query_strategy`
+
+#### Dependencies
+
+- Blocked by: Tasks A and B.
+- Blocks: Task L.
+
+#### Notes
+
+Do not include agent framework prompts, orchestration protocols, or behavior
+that would mutate annotations unless the user explicitly asks for that mutation.
+
+### Task D: Decide `/api/ports` HTTP Contract
+
+Type: HITL
+
+#### Objective
+
+Choose whether `GET /api/ports` should be implemented on the census server or
+removed/deferred from the documented web API contract. This resolves the current
+README/server mismatch before implementation.
+
+#### Context
+
+- Source: `docs/plans/pj-sandbox-agent-access.md#http-service`
+- Files:
+  - `README.md` - documents `GET /api/ports`
+  - `pj/census_server.py` - current server routes
+  - `pj/runtime_ports.py` - local runtime port sensor
+  - `pj/cli.py` - `pj ports` command
+  - `tests/test_runtime_ports.py` and `tests/test_census.py` - existing coverage
+- Discovery:
+  - `rg "api/ports|include_ports|pj ports|runtime_ports" README.md pj tests`
+  - `rg "def _cmd_ports|ports_p|runtime_ports.ports" pj/cli.py pj/runtime_ports.py`
+  - `rg "parsed.path == \"/api/ports\"|include_ports" pj/census_server.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Decide implement-now versus document-defer.
+- If implementing, define query parameters and response envelope by mapping to
+  `pj ports`.
+- If deferring, define the replacement documentation text pointing users to
+  `GET /api/census?include_ports=1`.
+
+Out:
+- Implementing the chosen behavior.
+- Changing port detection semantics.
+
+#### Acceptance Criteria
+
+- [ ] The chosen direction is written in this plan or a linked decision note.
+- [ ] If implementing, endpoint parameters and envelope metadata are specified.
+- [ ] If deferring, README wording is specified.
+- [ ] Downstream implementation does not need to choose between code and docs.
+
+#### Testing
+
+- Documentation-only task; no test command required.
+- Optional sanity check: `rg "api/ports|include_ports" README.md docs/plans/pj-sandbox-agent-access.md`
+
+#### Dependencies
+
+- Blocked by: None - can start immediately.
+- Blocks: Task G.
+
+#### Notes
+
+This is independent of host-backed chat search. It is included because a remote
+CLI contract should not advertise an endpoint the server does not route.
+
+### Task E: Add `pj health` and Health-Only Remote Client Path
 
 Type: AFK
 
-Blocked by: ticket 1
+#### Objective
 
-What to build: Add a `SKILL.md` contract for agents using `pj`, focused on
-sensors versus actuators, sandbox workflow, JSON envelope expectations, and safe
-read patterns.
+Add `pj health` as the first vertical remote-read slice. Local mode should
+report local capability and local census service status; remote mode should call
+`GET /api/health` using `PJ_REMOTE_URL` and return a standard `pj` envelope.
 
-Acceptance criteria:
+#### Context
 
-- [ ] Skill identifies `search`, `show`, `chats`, `chat`, and `next` as safe
-      read sensors.
-- [ ] Skill identifies annotation commands as actuators requiring explicit user
-      intent.
-- [ ] Skill explains `PJ_REMOTE_URL` and the Docker `host.docker.internal`
-      convention.
-- [ ] Skill tells agents to use `--pretty` only for human-facing display.
+- Source: `docs/plans/pj-sandbox-agent-access.md#cli-behavior`
+- Files:
+  - `pj/cli.py` - argparse setup and command dispatch
+  - `pj/census_process.py` - local background server status helper
+  - `pj/census_server.py` - `GET /api/health`
+  - `pj/envelope.py` - standard envelope helpers
+  - `tests/test_pj.py` - CLI tests
+- Discovery:
+  - `rg "census status|_cmd_census|census_process.status|api/health" pj tests`
+  - `rg "def build_parser|elif args.command|envelope.ok|envelope.err" pj/cli.py pj/envelope.py`
+  - `rg "PJ_REMOTE_URL|urlopen|Request|urllib" pj tests`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
 
-### 3. Add `pj health`
+#### Scope
 
-Type: AFK
+In:
+- `pj health` parser command.
+- Local status envelope.
+- Remote `GET /api/health` call when `PJ_REMOTE_URL` is set.
+- Token header support using names chosen in Task A.
+- Focused tests with mocked HTTP/status calls.
 
-Blocked by: ticket 1
+Out:
+- Routing other read commands through remote mode.
+- Starting/stopping the census server.
+- Auto-detecting Docker host URLs.
 
-What to build: Add a small health command that reports whether `pj` can serve or
-reach the configured backend. Local mode reports local capability and census
-service status; remote mode calls `GET /api/health`.
+#### Acceptance Criteria
 
-Acceptance criteria:
+- [ ] `pj health` returns a standard envelope in local mode.
+- [ ] `PJ_REMOTE_URL=... pj health` calls `/api/health`.
+- [ ] Remote connection errors return `success: false` with `meta.error`.
+- [ ] Token header behavior follows Task A.
+- [ ] Existing `pj census status` behavior is unchanged.
 
-- [ ] `pj health` returns the standard envelope.
-- [ ] With no `PJ_REMOTE_URL`, output describes local mode and whether the local
-      census service is reachable.
-- [ ] With `PJ_REMOTE_URL`, output reports remote health or a structured error.
-- [ ] Tests cover local and remote success/error cases without requiring a real
-      network service.
+#### Testing
 
-### 4. Add Remote Read Client Facade
+- Focused: `python3 -m pytest tests/test_pj.py -k "health or census"`
+- Broader: `python3 -m pytest tests/test_pj.py tests/test_census.py`
 
-Type: AFK
+#### Dependencies
 
-Blocked by: ticket 3
+- Blocked by: Task A.
+- Blocks: Tasks H, I, J, and K.
 
-What to build: Add a small stdlib HTTP facade used by CLI read commands when
-`PJ_REMOTE_URL` is set. The facade should preserve the existing envelope shape
-and hide URL construction from command handlers.
+#### Notes
 
-Acceptance criteria:
+Keep this slice small. A tiny remote HTTP helper may be introduced here, but it
+only needs to support health until later slices extend it.
 
-- [ ] Facade supports `health`, `search`, `show`, `chats`, `chat`, and `next`.
-- [ ] Facade sends `PJ_REMOTE_TOKEN` when configured.
-- [ ] HTTP errors, invalid JSON, and envelope errors become standard `pj`
-      errors.
-- [ ] Tests cover URL construction, query encoding, token headers, and failures.
-
-### 5. Protect Remote Server Exposure
-
-Type: HITL until policy is chosen; AFK after the policy is written down
-
-Blocked by: ticket 1
-
-What to build: Decide and implement the security policy for serving `pj` beyond
-loopback. The current server exposes both read endpoints and annotation write
-endpoints, so non-loopback serving must not silently expose actuators.
-
-Acceptance criteria:
-
-- [ ] Policy states whether auth is required for all non-loopback binds.
-- [ ] Policy states whether writes require a separate `PJ_WRITE_TOKEN`.
-- [ ] Server enforces the policy consistently for reads, writes, and control
-      endpoints.
-- [ ] Unsafe non-loopback startup either fails or emits a structured warning
-      that the CLI can surface.
-- [ ] Tests cover unauthenticated read/write requests, authenticated requests,
-      and loopback defaults.
-
-### 6. Wire CLI Read Commands Through Remote Mode
+### Task F: Enforce Remote Server Exposure Policy
 
 Type: AFK
 
-Blocked by: tickets 4 and 5
+#### Objective
 
-What to build: Route CLI read commands through the remote facade when
-`PJ_REMOTE_URL` is set while preserving current local behavior and pretty
+Implement the remote exposure/auth policy chosen in Task A on the census server
+and process start/serve paths. Non-loopback serving must not silently expose
+annotation actuators.
+
+#### Context
+
+- Source: Task A decision and `docs/plans/pj-sandbox-agent-access.md#security-and-safety-rails`
+- Files:
+  - `pj/census_server.py` - HTTP route handling, auth checks, control endpoint,
+    annotation endpoints
+  - `pj/census_process.py` - background start/status state
+  - `pj/cli.py` - `pj census serve/start` flags and errors
+  - `tests/test_census.py` - server endpoint tests
+  - `tests/test_pj.py` - CLI/process behavior tests if CLI output changes
+- Discovery:
+  - `rg "PJ_CENSUS_CONTROL_TOKEN|PJ_READ_TOKEN|PJ_WRITE_TOKEN|Authorization|X-PJ" pj tests`
+  - `rg "def do_GET|def do_POST|_handle_annotation|api/control/stop" pj/census_server.py`
+  - `rg "def start|command = \\[|PJ_CENSUS_BACKGROUND" pj/census_process.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Server-side enforcement for read/write/control surfaces.
+- Startup behavior for unsafe non-loopback serving as chosen in Task A.
+- Structured envelope errors where requests reach the API layer.
+- Focused tests for loopback default, non-loopback auth, bad token, good token,
+  and write-gating behavior.
+
+Out:
+- Remote CLI read command routing.
+- Remote annotation write CLI support.
+- TLS, user accounts, or multi-tenant auth.
+
+#### Acceptance Criteria
+
+- [ ] Non-loopback serving follows the Task A policy.
+- [ ] Read endpoints and annotation endpoints are handled separately if policy
+      requires separate tokens.
+- [ ] Control endpoint remains protected by its control token.
+- [ ] Unauthenticated and unauthorized requests fail predictably.
+- [ ] Tests cover both safe defaults and configured remote exposure.
+
+#### Testing
+
+- Focused: `python3 -m pytest tests/test_census.py -k "health or annotation or control or auth"`
+- Broader: `python3 -m pytest tests/test_census.py tests/test_pj.py`
+
+#### Dependencies
+
+- Blocked by: Task A.
+- Blocks: Task L.
+
+#### Notes
+
+Prefer a small helper for auth checks in `pj/census_server.py`; avoid scattering
+token parsing across every handler.
+
+### Task G: Align `/api/ports` Contract With Server
+
+Type: AFK
+
+#### Objective
+
+Apply the decision from Task D so the documented web API and census server agree
+about port data. Either implement `GET /api/ports` as a thin wrapper over
+`pj ports` semantics or revise docs to defer that endpoint and point at
+`GET /api/census?include_ports=1`.
+
+#### Context
+
+- Source: Task D decision
+- Files:
+  - `README.md` - web API contract table
+  - `pj/census_server.py` - server route table and handlers
+  - `pj/runtime_ports.py` - runtime port sensor
+  - `pj/cli.py` - `pj ports` command
+  - `tests/test_runtime_ports.py` and `tests/test_census.py` - test coverage
+- Discovery:
+  - `rg "api/ports|include_ports|pj ports|runtime_ports" README.md pj tests`
+  - `rg "def _cmd_ports|runtime_ports.ports|ports_p" pj/cli.py pj/runtime_ports.py`
+  - `rg "ThreadingHTTPServer|_api_request|include_ports" tests/test_census.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- The chosen code/doc change from Task D.
+- Tests for the chosen endpoint or documentation contract.
+
+Out:
+- Changing runtime port detection heuristics.
+- Remote CLI support for `pj ports` unless explicitly chosen by Task D.
+
+#### Acceptance Criteria
+
+- [ ] README and server behavior agree.
+- [ ] If implemented, `/api/ports` returns the standard envelope and wraps
+      existing `pj ports` semantics.
+- [ ] If deferred, README states port data is available via
+      `/api/census?include_ports=1`.
+- [ ] Focused tests cover the chosen behavior.
+
+#### Testing
+
+- If implemented: `python3 -m pytest tests/test_census.py tests/test_runtime_ports.py`
+- If docs-only defer: `python3 -m pytest tests/test_runtime_ports.py`
+
+#### Dependencies
+
+- Blocked by: Task D.
+- Blocks: Task L.
+
+#### Notes
+
+Do not let this task grow into a broader port-detection refactor.
+
+### Task H: Route `pj search` Through Remote Mode
+
+Type: AFK
+
+#### Objective
+
+Make `pj search` use the host service when `PJ_REMOTE_URL` is set while
+preserving local behavior, JSON envelope shape, query semantics, and `--pretty`
 rendering.
 
-Acceptance criteria:
+#### Context
 
-- [ ] `pj search`, `pj show`, `pj chats`, `pj chat`, and `pj next` use remote
-      mode only when `PJ_REMOTE_URL` is set.
-- [ ] Human `--pretty` output still renders from the returned envelope data.
-- [ ] Local command behavior is unchanged when `PJ_REMOTE_URL` is absent.
-- [ ] Tests cover local and remote behavior for each command.
+- Source: `docs/plans/pj-sandbox-agent-access.md#cli-behavior`
+- Files:
+  - `pj/cli.py` - `_cmd_search`
+  - `pj/search.py` - local search semantics
+  - `pj/census_server.py` - `/api/search` query contract
+  - `pj/pretty.py` - `print_search`
+  - `tests/test_pj.py` and `tests/test_census.py` - current search tests
+- Discovery:
+  - `rg "def _cmd_search|SEARCH_HELP|looks_like_regex|print_search" pj tests`
+  - `rg "_handle_search|/api/search|query=query" pj/census_server.py tests/test_census.py`
+  - `rg "test_cli_search|test_census_server_search" tests`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
 
-### 7. Document Host and Sandbox Setup
+#### Scope
+
+In:
+- Remote mode for `pj search` only.
+- URL/query encoding for `q`, `limit`, `sort`, `project`, `match`, and `regex`.
+- Preserve local mode when `PJ_REMOTE_URL` is absent.
+- Preserve `--pretty` output by rendering remote `data`.
+
+Out:
+- Remote mode for other commands.
+- New search ranking or field selection.
+- Automatic Docker host discovery.
+
+#### Acceptance Criteria
+
+- [ ] Local `pj search` tests still pass unchanged.
+- [ ] With `PJ_REMOTE_URL`, `pj search` calls `/api/search`.
+- [ ] Multi-term queries become repeated `q` parameters.
+- [ ] Remote envelope errors become standard CLI errors.
+- [ ] `--pretty` renders remote results.
+
+#### Testing
+
+- Focused: `python3 -m pytest tests/test_pj.py -k "search and remote"`
+- Regression: `python3 -m pytest tests/test_pj.py::test_cli_search_json tests/test_census.py::test_census_server_search_endpoint_maps_cli_query_semantics`
+
+#### Dependencies
+
+- Blocked by: Task E.
+- Blocks: Task L.
+
+#### Notes
+
+Keep regex hint behavior consistent. If the server provides `meta.hint`, the CLI
+should preserve it in JSON mode and render equivalent human guidance in pretty
+mode.
+
+### Task I: Route `pj show` Through Remote Mode
 
 Type: AFK
 
-Blocked by: tickets 5 and 6
+#### Objective
 
-What to build: Document the end-to-end host and sandbox workflow for users and
-agents.
+Make `pj show` use the host service when `PJ_REMOTE_URL` is set while
+preserving local project resolution behavior, JSON envelope shape, session
+limit handling, and `--pretty` rendering.
 
-Acceptance criteria:
+#### Context
 
-- [ ] Docs show the host-side serve/start command.
-- [ ] Docs show sandbox `PJ_REMOTE_URL` and token environment variables.
-- [ ] Docs include example `pj search`, `pj show`, and `pj chat` calls from a
-      sandbox.
-- [ ] Docs state that sandbox agents should treat annotation writes as
-      actuators.
+- Source: `docs/plans/pj-sandbox-agent-access.md#cli-behavior`
+- Files:
+  - `pj/cli.py` - `_cmd_show`
+  - `pj/project_sessions.py` - local project detail helper
+  - `pj/census_server.py` - `/api/show`
+  - `pj/pretty.py` - project detail rendering
+  - `tests/test_pj.py` and `tests/test_census.py` - show/project detail tests
+- Discovery:
+  - `rg "def _cmd_show|resolve_project_detail|print_status|/api/show" pj tests`
+  - `rg "test_cli_status|test_cli_show|test_census_server_show" tests`
+  - `rg "project_session_data|resolve_project_detail" pj/project_sessions.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
 
-### 8. Resolve `/api/ports` Contract Mismatch
+#### Scope
+
+In:
+- Remote mode for `pj show` only.
+- `project` and `sessions` query mapping.
+- Preserve local behavior when `PJ_REMOTE_URL` is absent.
+- Preserve `--pretty` rendering from remote `data`.
+
+Out:
+- Remote mode for `pj chats` or `pj chat`.
+- Changing project fuzzy resolution semantics.
+
+#### Acceptance Criteria
+
+- [ ] Local `pj show` behavior is unchanged.
+- [ ] With `PJ_REMOTE_URL`, `pj show <project> --sessions N` calls
+      `/api/show?project=<project>&sessions=N`.
+- [ ] Missing/not-found remote responses return standard CLI errors.
+- [ ] `--pretty` renders remote project details.
+- [ ] Focused tests cover JSON and pretty remote paths.
+
+#### Testing
+
+- Focused: `python3 -m pytest tests/test_pj.py -k "show and remote"`
+- Regression: `python3 -m pytest tests/test_census.py -k "show"`
+
+#### Dependencies
+
+- Blocked by: Task E.
+- Blocks: Task L.
+
+#### Notes
+
+Do not make `--here` for `show`; current CLI does not expose that flag.
+
+### Task J: Route `pj chats` and `pj chat` Through Remote Mode
 
 Type: AFK
 
-Blocked by: None
+#### Objective
 
-What to build: Align the README web API contract with the census server. Either
-implement `GET /api/ports` or remove/defer it from the documented HTTP contract.
+Make `pj chats` and `pj chat` use the host service when `PJ_REMOTE_URL` is set,
+so a sandbox agent can list sessions for a host project and fetch bounded chat
+content without mounting the host session store.
 
-Acceptance criteria:
+#### Context
 
-- [ ] README and server routes agree.
-- [ ] If implemented, `/api/ports` wraps existing `pj ports` semantics and
-      returns the standard envelope.
-- [ ] If deferred, README explains that port data is currently available through
-      `GET /api/census?include_ports=1`.
-- [ ] Tests cover the chosen behavior.
+- Source: `docs/plans/pj-sandbox-agent-access.md#sandbox-workflow`
+- Files:
+  - `pj/cli.py` - `_cmd_chats`, `_cmd_chat`, aliases, flags
+  - `pj/census_server.py` - `/api/chats`, `/api/chat`, `/api/chat/<session_id>`
+  - `pj/pretty.py` - session and chat renderers
+  - `tests/test_pj.py` and `tests/test_census.py` - current chat tests
+- Discovery:
+  - `rg "def _cmd_chats|def _cmd_chat|chat list|--no-tools|--roles|--last" pj/cli.py tests/test_pj.py`
+  - `rg "_handle_chats|_handle_chat|/api/chat" pj/census_server.py tests/test_census.py`
+  - `rg "print_chat|print_sessions" pj/pretty.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Remote mode for `pj chats`.
+- Remote mode for `pj chat`.
+- Query mapping for `project`, `limit`, `session_id`, `roles`, `no_tools`,
+  `all_branches`, `last`, and `offset`.
+- Preserve local mode and `chat list` alias when `PJ_REMOTE_URL` is absent.
+
+Out:
+- Remote resume command execution.
+- Remote annotation writes.
+- Changing local chat parsing/session-store behavior.
+
+#### Acceptance Criteria
+
+- [ ] With `PJ_REMOTE_URL`, `pj chats <project> --limit N` calls `/api/chats`.
+- [ ] With `PJ_REMOTE_URL`, `pj chat <session_id> ...` calls `/api/chat/<id>`.
+- [ ] Local `pj chats`, `pj chat`, and `pj chat list` behavior is unchanged.
+- [ ] `--pretty`, `--no-tools`, `--roles`, `--last`, `--offset`, and `--limit`
+      behavior is covered by tests.
+- [ ] Remote errors return standard CLI errors.
+
+#### Testing
+
+- Focused: `python3 -m pytest tests/test_pj.py -k "chat and remote"`
+- Regression: `python3 -m pytest tests/test_pj.py -k "cli_chats or cli_chat" tests/test_census.py -k "chat"`
+
+#### Dependencies
+
+- Blocked by: Task E.
+- Blocks: Task L.
+
+#### Notes
+
+For sandbox agents, this is the key drill-down path after `pj search`.
+
+### Task K: Route `pj next` Through Remote Mode
+
+Type: AFK
+
+#### Objective
+
+Make `pj next` use the host service when `PJ_REMOTE_URL` is set while preserving
+local scheduling behavior and pretty rendering. This lets sandbox agents inspect
+the host-side work queue without owning the host project index.
+
+#### Context
+
+- Source: `docs/plans/pj-sandbox-agent-access.md#cli-behavior`
+- Files:
+  - `pj/cli.py` - `_cmd_next`
+  - `pj/schedule.py` - local scoring heuristic
+  - `pj/census_server.py` - `/api/next`
+  - `pj/pretty.py` - `print_next`
+  - `tests/test_pj.py` and `tests/test_census.py` - next tests
+- Discovery:
+  - `rg "def _cmd_next|print_next|score_projects|/api/next" pj tests`
+  - `rg "test_cli_next|test_census_server_next" tests`
+  - `rg "next_p.add_argument|--limit" pj/cli.py`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Remote mode for `pj next`.
+- `limit` query mapping.
+- Preserve local behavior when `PJ_REMOTE_URL` is absent.
+- Preserve `--pretty` rendering from remote `data`.
+
+Out:
+- Changing schedule scoring.
+- Adding browser next-queue behavior; it already exists.
+
+#### Acceptance Criteria
+
+- [ ] Local `pj next` tests still pass.
+- [ ] With `PJ_REMOTE_URL`, `pj next --limit N` calls `/api/next?limit=N`.
+- [ ] Remote envelope errors become standard CLI errors.
+- [ ] `--pretty` renders remote recommendations.
+
+#### Testing
+
+- Focused: `python3 -m pytest tests/test_pj.py -k "next and remote"`
+- Regression: `python3 -m pytest tests/test_pj.py::test_cli_next_json tests/test_census.py::test_census_server_next_endpoint_uses_schedule_flow`
+
+#### Dependencies
+
+- Blocked by: Task E.
+- Blocks: Task L.
+
+#### Notes
+
+This is a read-only sensor. Do not add remote annotation actions here.
+
+### Task L: Document Host and Sandbox Setup
+
+Type: AFK
+
+#### Objective
+
+Document the end-to-end workflow for running `pj` on the host and using the
+same CLI from a disposable sandbox through `PJ_REMOTE_URL`.
+
+#### Context
+
+- Source: `docs/plans/pj-sandbox-agent-access.md`
+- Files:
+  - `README.md` - user-facing CLI and web API documentation
+  - `docs/plans/pj-sandbox-agent-access.md` - design and task graph
+  - skill path from Task B/Task C - agent-facing workflow
+  - `pj/cli.py` - actual flags and command names
+- Discovery:
+  - `rg "census start|census serve|PJ_REMOTE_URL|host.docker.internal|pj health" README.md docs`
+  - `rg "pj search|pj show|pj chats|pj chat|pj next" README.md docs`
+  - `rg "PJ_READ_TOKEN|PJ_WRITE_TOKEN|PJ_REMOTE_TOKEN|Authorization" README.md docs pj`
+- Scratchpad/plan: `docs/plans/pj-sandbox-agent-access.md`
+
+#### Scope
+
+In:
+- Host setup command.
+- Sandbox env vars and example commands.
+- Token/auth setup from Task A/Task F.
+- Clear note that annotation writes are actuators.
+- Troubleshooting for missing host service or bad token.
+
+Out:
+- Implementing CLI/server behavior.
+- Writing long conceptual docs already covered by this plan.
+- Automatic Docker host detection.
+
+#### Acceptance Criteria
+
+- [ ] README includes host setup and sandbox setup.
+- [ ] README examples include `pj health`, `pj search`, `pj show`, and `pj chat`.
+- [ ] Docs mention `pj next` as a remote sensor if Task K is complete.
+- [ ] Docs reflect the final auth token names and write policy.
+- [ ] Skill and README do not contradict each other.
+
+#### Testing
+
+- Focused docs check: `rg "PJ_REMOTE_URL|host.docker.internal|pj health|PJ_REMOTE_TOKEN" README.md docs`
+- Optional command smoke if implementation exists: `python3 -m pj --help && python3 -m pj health`
+
+#### Dependencies
+
+- Blocked by: Tasks C, F, G, H, I, J, and K.
+- Blocks: None known.
+
+#### Notes
+
+Do not document `--host 0.0.0.0` as normal until Task F enforces the exposure
+policy.
+
+## Dependency Graph
+
+Use these labels when creating tracker issues, replacing them with real issue
+IDs after creation:
+
+- Task A: Decide Remote Exposure and Auth Policy - ready immediately.
+- Task B: Decide Skill Location and Distribution - ready immediately.
+- Task D: Decide `/api/ports` HTTP Contract - ready immediately.
+- Task C: Add Project-Juggler Agent Skill - blocked by Tasks A and B.
+- Task E: Add `pj health` and Health-Only Remote Client Path - blocked by Task A.
+- Task F: Enforce Remote Server Exposure Policy - blocked by Task A.
+- Task G: Align `/api/ports` Contract With Server - blocked by Task D.
+- Task H: Route `pj search` Through Remote Mode - blocked by Task E.
+- Task I: Route `pj show` Through Remote Mode - blocked by Task E.
+- Task J: Route `pj chats` and `pj chat` Through Remote Mode - blocked by Task E.
+- Task K: Route `pj next` Through Remote Mode - blocked by Task E.
+- Task L: Document Host and Sandbox Setup - blocked by Tasks C, F, G, H, I, J,
+  and K.
+
+Ready-queue check: Tasks A, B, and D can run independently. After those
+decisions, the skill, health path, auth enforcement, and ports contract can move
+without requiring agents to re-plan. Once Task E lands, the command-specific
+remote read slices can run independently. Task L is intentionally last so the
+docs only publish a workflow that is implemented and safe.
 
 ## Non-Goals
 
