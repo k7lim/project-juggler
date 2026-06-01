@@ -163,6 +163,15 @@ HTML = """<!DOCTYPE html>
   .detail-value { color: var(--text-bright); overflow-wrap: anywhere; }
   .drawer-section { margin-top: 14px; }
   .drawer-section h3 { color: var(--text-bright); font-size: 12px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .annotation-actions { display: grid; gap: 7px; }
+  .action-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .action-row input[type="text"] { flex: 1 1 150px; width: auto; }
+  .action-row select { flex: 0 0 auto; }
+  .action-row button { flex: 0 0 auto; }
+  .action-status { color: var(--text-dim); font-size: 11px; min-height: 16px; }
+  .archive-action { border-top: 1px solid var(--border); padding-top: 7px; }
+  .danger { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); color: var(--red); }
+  .danger:disabled { cursor: not-allowed; opacity: 0.45; }
   .session-list { display: grid; gap: 8px; }
   .session-card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--bg); }
   .session-card .session-title { font-weight: 650; overflow-wrap: anywhere; }
@@ -486,6 +495,7 @@ function renderProjectDetail(project) {
   document.getElementById("drawerProjectName").textContent = project.name || "(unnamed)";
   document.getElementById("drawerProjectPath").textContent = project.path || "";
   const sessions = project.sessions || [];
+  const projectId = project.id || project.path || "";
   const detailRows = [
     detailItem("ID", project.id),
     detailItem("State", project.state),
@@ -497,6 +507,33 @@ function renderProjectDetail(project) {
     detailItem("Last active", compactDate(project.last_active)),
   ].join("");
   const note = project.latest_note ? `<div class="drawer-section"><h3>Note</h3><div class="detail-item"><div class="detail-value">${esc(project.latest_note)}</div></div></div>` : "";
+  const actions = `<div class="drawer-section">
+      <h3>Actions</h3>
+      <div class="annotation-actions" data-project-id="${esc(projectId)}">
+        <div class="action-row">
+          <input type="text" class="annotation-note" placeholder="Add note">
+          <button class="annotation-submit" data-action="note">Note</button>
+        </div>
+        <div class="action-row">
+          <select class="annotation-priority" aria-label="Priority">
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="none">None</option>
+          </select>
+          <button class="annotation-submit" data-action="prioritize">Prioritize</button>
+        </div>
+        <div class="action-row">
+          <input type="text" class="annotation-tag" placeholder="Tag">
+          <button class="annotation-submit" data-action="tag">Tag</button>
+        </div>
+        <div class="action-row archive-action">
+          <label><input type="checkbox" class="annotation-archive-confirm"> Confirm archive</label>
+          <button class="annotation-submit danger" data-action="archive" disabled>Archive</button>
+        </div>
+        <div class="action-status" aria-live="polite"></div>
+      </div>
+    </div>`;
   const resume = project.resume_cmd ? `<div class="drawer-section"><h3>Resume</h3>${renderResume(project.resume_cmd)}</div>` : "";
   const sessionList = sessions.length
     ? sessions.map(renderDetailSession).join("")
@@ -504,6 +541,7 @@ function renderProjectDetail(project) {
   document.getElementById("drawerBody").innerHTML = `
     <div class="drawer-grid">${detailRows}</div>
     ${note}
+    ${actions}
     ${resume}
     <div class="drawer-section">
       <h3>Recent sessions</h3>
@@ -547,6 +585,50 @@ async function openProjectDetail(projectId) {
     if (requestId !== detailRequestId) return;
     document.getElementById("drawerProjectName").textContent = "Project detail";
     document.getElementById("drawerBody").innerHTML = `<div class="detail-item" style="color: var(--red);">${esc(err)}</div>`;
+  }
+}
+
+function annotationBody(actions, action) {
+  const body = { project: actions.dataset.projectId || activeProjectId };
+  if (action === "note") body.text = actions.querySelector(".annotation-note")?.value.trim() || "";
+  if (action === "prioritize") body.level = actions.querySelector(".annotation-priority")?.value || "";
+  if (action === "tag") body.tag = actions.querySelector(".annotation-tag")?.value.trim() || "";
+  return body;
+}
+
+async function submitAnnotation(button) {
+  const actions = button.closest(".annotation-actions");
+  const action = button.dataset.action;
+  if (!actions || !action) return;
+  const status = actions.querySelector(".action-status");
+  const confirmArchive = actions.querySelector(".annotation-archive-confirm");
+  if (action === "archive" && !confirmArchive?.checked) {
+    if (status) status.textContent = "Confirm archive first.";
+    return;
+  }
+
+  const body = annotationBody(actions, action);
+  button.disabled = true;
+  if (status) status.textContent = "Saving...";
+  try {
+    const response = await fetch(`/api/annotations/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!payload.success) throw new Error(payload.meta?.error || "annotation failed");
+    if (action === "note") actions.querySelector(".annotation-note").value = "";
+    if (action === "tag") actions.querySelector(".annotation-tag").value = "";
+    if (action === "archive" && confirmArchive) confirmArchive.checked = false;
+    if (status) status.textContent = "Saved.";
+    await loadData(true);
+    if (activeProjectId) await openProjectDetail(activeProjectId);
+  } catch (err) {
+    if (status) status.textContent = String(err);
+  } finally {
+    if (action === "archive") button.disabled = !confirmArchive?.checked;
+    else button.disabled = false;
   }
 }
 
@@ -713,8 +795,20 @@ document.getElementById("projectDrawer").addEventListener("click", event => {
     navigator.clipboard?.writeText(button.dataset.cmd || "");
     return;
   }
+  const annotationButton = event.target.closest(".annotation-submit");
+  if (annotationButton) {
+    submitAnnotation(annotationButton);
+    return;
+  }
   const transcriptButton = event.target.closest(".transcript-open");
   if (transcriptButton) openTranscript(transcriptButton);
+});
+document.getElementById("projectDrawer").addEventListener("change", event => {
+  const confirmArchive = event.target.closest(".annotation-archive-confirm");
+  if (!confirmArchive) return;
+  const actions = confirmArchive.closest(".annotation-actions");
+  const archiveButton = actions?.querySelector('.annotation-submit[data-action="archive"]');
+  if (archiveButton) archiveButton.disabled = !confirmArchive.checked;
 });
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") closeDrawer();

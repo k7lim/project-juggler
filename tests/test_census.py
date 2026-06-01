@@ -10,6 +10,7 @@ from unittest import mock
 
 from pj import census, census_process, cli
 from pj.census_server import CensusCache, HTML, make_handler
+from pj.paths import annotations_path
 from pj.project_sessions import resolve_project_detail
 
 
@@ -441,6 +442,23 @@ def test_census_dashboard_has_lazy_session_transcript_viewer():
     assert 'document.getElementById("projectDrawer").addEventListener("click"' in HTML
 
 
+def test_census_dashboard_has_annotation_actions_and_archive_confirmation():
+    assert 'class="annotation-actions" data-project-id="${esc(projectId)}"' in HTML
+    assert 'class="annotation-note" placeholder="Add note"' in HTML
+    assert 'class="annotation-priority" aria-label="Priority"' in HTML
+    assert 'data-action="prioritize"' in HTML
+    assert 'class="annotation-tag" placeholder="Tag"' in HTML
+    assert 'data-action="tag"' in HTML
+    assert 'class="annotation-archive-confirm"> Confirm archive' in HTML
+    assert 'data-action="archive" disabled' in HTML
+    assert 'if (action === "archive" && !confirmArchive?.checked)' in HTML
+    assert 'fetch(`/api/annotations/${action}`' in HTML
+    assert 'method: "POST"' in HTML
+    assert "await loadData(true)" in HTML
+    assert "if (activeProjectId) await openProjectDetail(activeProjectId)" in HTML
+    assert 'archiveButton.disabled = !confirmArchive.checked' in HTML
+
+
 def test_census_dashboard_requests_server_provided_live_urls():
     assert 'fetch(`/api/census?include_ports=1${force ? "&refresh=1" : ""}`' in HTML
     assert "liveUrlsCell(r.live_urls)" in HTML
@@ -512,14 +530,13 @@ def test_census_server_show_chats_and_chat_endpoints_map_to_session_store():
     assert chat_payload["meta"]["limit"] == 1
 
 
-def test_census_server_annotation_endpoints_append_only_via_annotate_api(tmp_path):
-    ann_path = tmp_path / "annotations.jsonl"
+def test_census_server_annotation_endpoints_append_only_via_annotate_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
     project = {"id": "abc123", "name": "proj", "path": "/tmp/proj"}
 
     server, thread = _test_server()
     try:
-        with mock.patch("pj.annotate.annotations_path", return_value=ann_path), \
-             mock.patch("pj.census_server.discover.resolve_project", return_value=project):
+        with mock.patch("pj.census_server.discover.resolve_project", return_value=project):
             note_status, note_payload = _api_request(
                 server,
                 "/api/annotations/note",
@@ -532,6 +549,18 @@ def test_census_server_annotation_endpoints_append_only_via_annotate_api(tmp_pat
                 method="POST",
                 body={"project": "abc", "level": "high"},
             )
+            tag_status, tag_payload = _api_request(
+                server,
+                "/api/annotations/tag",
+                method="POST",
+                body={"project": "abc", "tag": "dashboard"},
+            )
+            archive_status, archive_payload = _api_request(
+                server,
+                "/api/annotations/archive",
+                method="POST",
+                body={"project": "abc"},
+            )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -542,11 +571,21 @@ def test_census_server_annotation_endpoints_append_only_via_annotate_api(tmp_pat
     assert note_payload["data"]["project_path"] == "/tmp/proj"
     assert priority_status == 200
     assert priority_payload["data"]["type"] == "priority"
+    assert tag_status == 200
+    assert tag_payload["data"]["type"] == "tag"
+    assert archive_status == 200
+    assert archive_payload["data"]["type"] == "archive"
 
+    ann_path = annotations_path()
     lines = ann_path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[0])["text"] == "next: document API"
-    assert json.loads(lines[1])["value"] == "high"
+    assert len(lines) == 4
+    events = [json.loads(line) for line in lines]
+    assert [event["type"] for event in events] == ["note", "priority", "tag", "archive"]
+    assert [event["project_path"] for event in events] == ["/tmp/proj"] * 4
+    assert events[0]["text"] == "next: document API"
+    assert events[1]["value"] == "high"
+    assert events[2]["tag"] == "dashboard"
+    assert "text" not in events[3]
 
 
 def test_cli_census_outputs_dashboard_json(capsys):
