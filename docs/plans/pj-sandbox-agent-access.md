@@ -201,6 +201,159 @@ Remote mode should also support the same context-window controls as local mode:
 6. Add docs for host setup and sandbox setup.
 7. Later: add `pj schema` or `pj --describe` for runtime introspection.
 
+## Proposed Tickets
+
+These are intended as independently grabbable tracer bullets. Prefer creating
+them in this order so dependency edges point at real issue IDs.
+
+### 1. Update Sandbox-Agent Access Plan for Current Web API
+
+Type: AFK
+
+Blocked by: None
+
+What to build: Revise this plan after the current web API lands so it reflects
+`/api/next`, annotation endpoint exposure, and the `/api/ports` documentation
+versus route mismatch.
+
+Acceptance criteria:
+
+- [ ] `GET /api/next` is listed as a remote sensor candidate.
+- [ ] Annotation writes are called out as real actuators on the same server.
+- [ ] The `/api/ports` mismatch is either resolved or explicitly deferred.
+
+### 2. Add Project-Juggler Agent Skill
+
+Type: AFK
+
+Blocked by: ticket 1
+
+What to build: Add a `SKILL.md` contract for agents using `pj`, focused on
+sensors versus actuators, sandbox workflow, JSON envelope expectations, and safe
+read patterns.
+
+Acceptance criteria:
+
+- [ ] Skill identifies `search`, `show`, `chats`, `chat`, and `next` as safe
+      read sensors.
+- [ ] Skill identifies annotation commands as actuators requiring explicit user
+      intent.
+- [ ] Skill explains `PJ_REMOTE_URL` and the Docker `host.docker.internal`
+      convention.
+- [ ] Skill tells agents to use `--pretty` only for human-facing display.
+
+### 3. Add `pj health`
+
+Type: AFK
+
+Blocked by: ticket 1
+
+What to build: Add a small health command that reports whether `pj` can serve or
+reach the configured backend. Local mode reports local capability and census
+service status; remote mode calls `GET /api/health`.
+
+Acceptance criteria:
+
+- [ ] `pj health` returns the standard envelope.
+- [ ] With no `PJ_REMOTE_URL`, output describes local mode and whether the local
+      census service is reachable.
+- [ ] With `PJ_REMOTE_URL`, output reports remote health or a structured error.
+- [ ] Tests cover local and remote success/error cases without requiring a real
+      network service.
+
+### 4. Add Remote Read Client Facade
+
+Type: AFK
+
+Blocked by: ticket 3
+
+What to build: Add a small stdlib HTTP facade used by CLI read commands when
+`PJ_REMOTE_URL` is set. The facade should preserve the existing envelope shape
+and hide URL construction from command handlers.
+
+Acceptance criteria:
+
+- [ ] Facade supports `health`, `search`, `show`, `chats`, `chat`, and `next`.
+- [ ] Facade sends `PJ_REMOTE_TOKEN` when configured.
+- [ ] HTTP errors, invalid JSON, and envelope errors become standard `pj`
+      errors.
+- [ ] Tests cover URL construction, query encoding, token headers, and failures.
+
+### 5. Protect Remote Server Exposure
+
+Type: HITL until policy is chosen; AFK after the policy is written down
+
+Blocked by: ticket 1
+
+What to build: Decide and implement the security policy for serving `pj` beyond
+loopback. The current server exposes both read endpoints and annotation write
+endpoints, so non-loopback serving must not silently expose actuators.
+
+Acceptance criteria:
+
+- [ ] Policy states whether auth is required for all non-loopback binds.
+- [ ] Policy states whether writes require a separate `PJ_WRITE_TOKEN`.
+- [ ] Server enforces the policy consistently for reads, writes, and control
+      endpoints.
+- [ ] Unsafe non-loopback startup either fails or emits a structured warning
+      that the CLI can surface.
+- [ ] Tests cover unauthenticated read/write requests, authenticated requests,
+      and loopback defaults.
+
+### 6. Wire CLI Read Commands Through Remote Mode
+
+Type: AFK
+
+Blocked by: tickets 4 and 5
+
+What to build: Route CLI read commands through the remote facade when
+`PJ_REMOTE_URL` is set while preserving current local behavior and pretty
+rendering.
+
+Acceptance criteria:
+
+- [ ] `pj search`, `pj show`, `pj chats`, `pj chat`, and `pj next` use remote
+      mode only when `PJ_REMOTE_URL` is set.
+- [ ] Human `--pretty` output still renders from the returned envelope data.
+- [ ] Local command behavior is unchanged when `PJ_REMOTE_URL` is absent.
+- [ ] Tests cover local and remote behavior for each command.
+
+### 7. Document Host and Sandbox Setup
+
+Type: AFK
+
+Blocked by: tickets 5 and 6
+
+What to build: Document the end-to-end host and sandbox workflow for users and
+agents.
+
+Acceptance criteria:
+
+- [ ] Docs show the host-side serve/start command.
+- [ ] Docs show sandbox `PJ_REMOTE_URL` and token environment variables.
+- [ ] Docs include example `pj search`, `pj show`, and `pj chat` calls from a
+      sandbox.
+- [ ] Docs state that sandbox agents should treat annotation writes as
+      actuators.
+
+### 8. Resolve `/api/ports` Contract Mismatch
+
+Type: AFK
+
+Blocked by: None
+
+What to build: Align the README web API contract with the census server. Either
+implement `GET /api/ports` or remove/defer it from the documented HTTP contract.
+
+Acceptance criteria:
+
+- [ ] README and server routes agree.
+- [ ] If implemented, `/api/ports` wraps existing `pj ports` semantics and
+      returns the standard envelope.
+- [ ] If deferred, README explains that port data is currently available through
+      `GET /api/census?include_ports=1`.
+- [ ] Tests cover the chosen behavior.
+
 ## Non-Goals
 
 - Do not sync host session indexes into each sandbox.
