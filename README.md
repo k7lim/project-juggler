@@ -294,6 +294,49 @@ annotation state directly:
 | `POST /api/annotations/tag` | `pj tag <project> <tag>` | `{ "project": "name-or-id-or-path", "tag": "backend" }` |
 | `POST /api/annotations/archive` | `pj archive <project>` | `{ "project": "name-or-id-or-path" }` |
 
+#### Web UX maintenance rules
+
+The web UX served by `pj census serve` is a local view over pj's CLI-first
+contracts. Future web features should preserve the same layering:
+
+1. CLI command or documented contract defines the behavior and JSON envelope.
+2. Server endpoint wraps that command/contract, validates browser input at the
+   HTTP edge, and returns the same envelope shape.
+3. Browser UI calls the server endpoint and renders the returned data.
+
+Do not put project, session, port, search, or annotation behavior only in the
+browser. A web/API capability should map to an existing or proposed CLI
+command/contract, as the endpoints above do for `pj census`, `pj ports`,
+`pj search`, `pj show`, `pj chats`, `pj chat`, and annotation commands. If a
+future web feature needs new behavior, define the CLI or contract boundary
+first, then add the endpoint and UI.
+
+The browser must not maintain a parallel source of truth. After a write, append
+through the annotation endpoint or other actuator endpoint, then refresh or
+rederive UI state from census, project, session, port, search, or annotation
+read endpoints. Optimistic display is acceptable only as temporary feedback
+while the canonical endpoint response is pending.
+
+Contribution checklist for web UX changes:
+
+- Keep pj CLI-first: every new capability has a CLI command or documented
+  contract before it becomes browser behavior.
+- Preserve the standard envelope: `{ "success": ..., "data": ..., "meta": ... }`
+  for API responses and errors.
+- Validate untrusted browser input at the endpoint boundary; keep core logic on
+  normalized values.
+- Append events for mutations; do not rewrite annotation state from the UI.
+- Avoid agent infrastructure in the web layer: no prompts, agent registries, or
+  browser-only orchestration protocols.
+- Refresh from canonical endpoints after writes instead of maintaining duplicate
+  UI state.
+- Update this contract when adding, renaming, or removing endpoints.
+
+Run Playwright browser validation when a change affects rendered web UI,
+browser interaction, routing, client-side state transitions, or the
+`pj census serve` HTTP surface used by the page. Documentation-only changes and
+CLI-only changes do not require Playwright unless they also alter web behavior.
+
 ### `pj show` - Deep dive into a project
 
 ```bash
