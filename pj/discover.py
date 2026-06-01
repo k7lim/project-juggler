@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-from . import cache, state
+from . import cache, state, web_hints
 from .session_store import get_store
 from .paths import annotations_path
 
@@ -79,12 +79,31 @@ def _build_project(path: str, cass_data: dict | None, ann: dict) -> dict:
         "tags": ann.get("tags", []),
         "latest_note": latest_note,
     }
+    web_hint = web_hints.detect(path)
+    if web_hint:
+        proj["web_hint"] = web_hint
     # Pass through detail fields when present
     if cass_data:
         for key in ("first_active", "total_duration_secs", "models"):
             if key in cass_data:
                 proj[key] = cass_data[key]
     return proj
+
+
+def _refresh_web_hints(projects: list[dict]) -> list[dict]:
+    """Overlay current static web hints onto cached project dicts."""
+    refreshed = []
+    for project in projects:
+        current = dict(project)
+        path = current.get("path")
+        if path:
+            web_hint = web_hints.detect(path)
+            if web_hint:
+                current["web_hint"] = web_hint
+            else:
+                current.pop("web_hint", None)
+        refreshed.append(current)
+    return refreshed
 
 
 def resolve_project(query: str) -> dict | None:
@@ -156,7 +175,7 @@ def discover(
     """Discover projects from CASS + annotations. Returns (page, total)."""
     cached = cache.load() if not detail else None
     if cached is not None:
-        projects = cached
+        projects = _refresh_web_hints(cached)
     else:
         cass_projects = get_store().list_projects(detail=detail)
         annotations = _read_annotations()

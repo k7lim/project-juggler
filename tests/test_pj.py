@@ -170,20 +170,29 @@ def test_cass_facade_no_db():
 # --- discover ---
 
 def test_discover_with_cass():
-    now_iso = datetime.now(timezone.utc).isoformat()
-    fake_projects = [
-        {"path": "/tmp/proj-x", "agents": ["claude"], "session_count": 5, "last_active": now_iso},
-    ]
-    with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
-         mock.patch.object(cache, "load", return_value=None), \
-         mock.patch.object(cache, "save"), \
-         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
-        projects, total = discover.discover()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        project_path = Path(tmpdir) / "proj-x"
+        project_path.mkdir()
+        (project_path / "index.html").write_text("<!doctype html>", encoding="utf-8")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        fake_projects = [
+            {"path": str(project_path), "agents": ["claude"], "session_count": 5, "last_active": now_iso},
+        ]
+        with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
+             mock.patch.object(cache, "load", return_value=None), \
+             mock.patch.object(cache, "save"), \
+             mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")):
+            projects, total = discover.discover()
 
     assert total == 1
     assert projects[0]["name"] == "proj-x"
     assert projects[0]["state"] == "active"
-    assert projects[0]["id"] == discover.project_id("/tmp/proj-x")
+    assert projects[0]["id"] == discover.project_id(str(project_path))
+    assert projects[0]["web_hint"] == {
+        "type": "web_app",
+        "confidence": "low",
+        "evidence": ["index.html"],
+    }
 
 
 def test_discover_state_filter():
@@ -226,6 +235,43 @@ def test_discover_uses_cache():
 
     assert total == 1
     assert projects[0]["id"] == "cached01"
+
+
+def test_discover_refreshes_cached_web_hints_from_project_files(tmp_path):
+    web_project = tmp_path / "web"
+    web_project.mkdir()
+    (web_project / "package.json").write_text(
+        json.dumps({"scripts": {"dev": "vite --host 127.0.0.1"}}),
+        encoding="utf-8",
+    )
+    plain_project = tmp_path / "plain"
+    plain_project.mkdir()
+    (plain_project / "README.md").write_text("# notes", encoding="utf-8")
+    cached_projects = [
+        {"id": "cached01", "name": "web", "path": str(web_project), "state": "active"},
+        {
+            "id": "cached02",
+            "name": "plain",
+            "path": str(plain_project),
+            "state": "active",
+            "web_hint": {"type": "web_app", "confidence": "medium", "evidence": ["stale"]},
+        },
+    ]
+
+    with mock.patch.object(cache, "load", return_value=cached_projects):
+        projects, total = discover.discover(sort="name")
+
+    assert total == 2
+    assert projects[0]["name"] == "plain"
+    assert "web_hint" not in projects[0]
+    assert projects[1]["name"] == "web"
+    assert projects[1]["web_hint"] == {
+        "type": "web_app",
+        "confidence": "medium",
+        "evidence": ["package.json:scripts.dev=vite --host 127.0.0.1"],
+    }
+    assert "web_hint" not in cached_projects[0]
+    assert cached_projects[1]["web_hint"]["evidence"] == ["stale"]
 
 
 def test_discover_annotations():

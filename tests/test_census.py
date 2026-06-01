@@ -62,6 +62,11 @@ def test_normalize_project_maps_detail_fields(tmp_path):
             "priority": "high",
             "tags": ["dashboard"],
             "latest_note": "next: ship it",
+            "web_hint": {
+                "type": "web_app",
+                "confidence": "medium",
+                "evidence": ["vite.config.ts"],
+            },
         }
     )
 
@@ -76,6 +81,7 @@ def test_normalize_project_maps_detail_fields(tmp_path):
     assert row["priority"] == "high"
     assert row["tags"] == "dashboard"
     assert row["note"] == "next: ship it"
+    assert row["web_hint"]["evidence"] == ["vite.config.ts"]
 
 
 def test_normalize_project_derives_origin_and_category():

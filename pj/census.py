@@ -94,6 +94,7 @@ def normalize_project(project: dict) -> dict:
         "priority": project.get("priority", "none"),
         "tags": ", ".join(project.get("tags", [])),
         "note": project.get("latest_note") or "",
+        "web_hint": project.get("web_hint"),
     }
 
 
