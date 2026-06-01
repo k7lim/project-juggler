@@ -113,6 +113,10 @@ cooking                       stale     content
 
 Each matching session shows a ready-to-paste resume command.
 
+For the proposed sandbox-agent workflow, where disposable Docker/yolobox agents
+use the same `pj` CLI while reading from a host-side `pj` service, see
+[`docs/plans/pj-sandbox-agent-access.md`](docs/plans/pj-sandbox-agent-access.md).
+
 ### `pj next` — What to work on
 
 Scores projects by priority, recency, momentum, staleness, and whether you left a note with a clear next step.
