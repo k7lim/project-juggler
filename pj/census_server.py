@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import annotate, cache, census, discover, envelope, resume
+from . import annotate, cache, census, discover, envelope, resume, schedule
 from . import search as search_mod
 from .project_sessions import project_session_data, resolve_project_detail
 from .session_store import get_store
@@ -87,6 +87,20 @@ HTML = """<!DOCTYPE html>
   .origin-yolobox { color: var(--cyan); }
   .origin-mac { color: var(--text-dim); }
   tr:hover { background: rgba(88,166,255,0.06); }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .tab-button {
+    border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent;
+  }
+  .tab-button.active {
+    color: var(--text-bright); border-color: var(--border); border-bottom-color: var(--surface);
+    background: var(--surface);
+  }
+  .view[hidden] { display: none; }
+  .project-link {
+    color: var(--accent); text-decoration: none; font-weight: 650;
+  }
+  .project-link:hover { color: var(--text-bright); text-decoration: underline; }
+  .reason-cell { max-width: 420px; white-space: normal; color: var(--text); }
   .badge { display: inline-block; min-width: 18px; text-align: center; background: var(--border); border-radius: 10px; padding: 0 5px; font-size: 10px; }
   .badge-hot { background: var(--accent); color: var(--bg); }
   .dur-bar { display: inline-block; height: 8px; border-radius: 2px; background: var(--accent); opacity: 0.5; vertical-align: middle; margin-right: 3px; }
@@ -208,6 +222,12 @@ HTML = """<!DOCTYPE html>
 <div class="stats" id="stats"></div>
 <div class="error" id="error"></div>
 
+<nav class="tabs" aria-label="Dashboard views">
+  <button class="tab-button active" data-view="census">Census</button>
+  <button class="tab-button" data-view="next">Next Queue</button>
+</nav>
+
+<section class="view" id="censusView">
 <div class="controls">
   <input type="text" id="search" placeholder="Search projects and sessions..." autofocus>
   <input type="text" id="tableFilter" placeholder="Filter census table...">
@@ -226,20 +246,8 @@ HTML = """<!DOCTYPE html>
   <div class="search-results" id="searchResults"></div>
 </section>
 
-<div class="drawer-backdrop" id="drawerBackdrop"></div>
-<aside class="drawer" id="projectDrawer" aria-hidden="true" aria-labelledby="drawerProjectName">
-  <div class="drawer-head">
-    <div class="drawer-title">
-      <h2 id="drawerProjectName">Project</h2>
-      <div class="drawer-path" id="drawerProjectPath"></div>
-    </div>
-    <button class="drawer-close" id="drawerClose" aria-label="Close project details">Close</button>
-  </div>
-  <div class="drawer-body" id="drawerBody"></div>
-</aside>
-
 <div class="table-wrap">
-<table>
+<table id="censusTable">
 <thead>
 <tr>
   <th data-key="name">Name <span class="arr">&#x25B2;&#x25BC;</span></th>
@@ -262,10 +270,44 @@ HTML = """<!DOCTYPE html>
 <tbody id="tbody"></tbody>
 </table>
 </div>
+</section>
+
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<aside class="drawer" id="projectDrawer" aria-hidden="true" aria-labelledby="drawerProjectName">
+  <div class="drawer-head">
+    <div class="drawer-title">
+      <h2 id="drawerProjectName">Project</h2>
+      <div class="drawer-path" id="drawerProjectPath"></div>
+    </div>
+    <button class="drawer-close" id="drawerClose" aria-label="Close project details">Close</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<section class="view" id="nextView" hidden>
+<div class="table-wrap">
+<table id="nextTable">
+<thead>
+<tr>
+  <th>Rank</th>
+  <th>Score</th>
+  <th>Project</th>
+  <th>State</th>
+  <th>Pri</th>
+  <th>Reason</th>
+  <th>Path</th>
+</tr>
+</thead>
+<tbody id="nextTbody"></tbody>
+</table>
+</div>
+</section>
 
 <script>
 let DATA = [];
 let META = {};
+let NEXT_DATA = [];
+let NEXT_META = {};
 let sortKey = "last_active_ts";
 let sortDir = -1;
 let maxDur = 1;
@@ -273,6 +315,8 @@ let searchTimer = null;
 let searchRequestId = 0;
 let detailRequestId = 0;
 let activeProjectId = null;
+let activeView = "census";
+let nextLoaded = false;
 
 function esc(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -309,6 +353,10 @@ function compactLiveUrl(url) {
 function liveUrlsCell(urls) {
   if (!Array.isArray(urls) || urls.length === 0) return "";
   return `<div class="live-links">${urls.map(url => `<a class="live-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(compactLiveUrl(url))}</a>`).join("")}</div>`;
+}
+
+function projectRef(row) {
+  return row?.id || row?.path || row?.name || "";
 }
 
 function updateSelect(id, values, labels) {
@@ -622,7 +670,8 @@ async function submitAnnotation(button) {
     if (action === "tag") actions.querySelector(".annotation-tag").value = "";
     if (action === "archive" && confirmArchive) confirmArchive.checked = false;
     if (status) status.textContent = "Saved.";
-    await loadData(true);
+    if (activeView === "next") await loadNextQueue(true);
+    else await loadData(true);
     if (activeProjectId) await openProjectDetail(activeProjectId);
   } catch (err) {
     if (status) status.textContent = String(err);
@@ -742,6 +791,47 @@ function render() {
   }
 }
 
+function renderNextQueue() {
+  document.getElementById("nextTbody").innerHTML = NEXT_DATA.map((r, index) => {
+    const ref = projectRef(r);
+    const name = r.name || (r.path ? String(r.path).split("/").filter(Boolean).pop() : "(unnamed)");
+    return `<tr data-project-id="${esc(ref)}">
+      <td class="num">${index + 1}</td>
+      <td class="num">${esc(r.score ?? "")}</td>
+      <td class="name"><a href="#" class="project-link" data-project-id="${esc(ref)}">${esc(name)}</a></td>
+      <td class="state-${esc(r.state)}">${esc(r.state || "")}</td>
+      <td>${r.priority && r.priority !== "none" ? esc(r.priority) : ""}</td>
+      <td class="reason-cell">${esc(r.reason || "")}</td>
+      <td class="path" title="${esc(r.path)}">${esc(r.path || "")}</td>
+    </tr>`;
+  }).join("");
+
+  document.getElementById("row-count").textContent = `${NEXT_DATA.length} recommendations`;
+  const actionable = NEXT_DATA.filter(r => Number(r.factors?.actionable || 0) > 0).length;
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="stat-val">${NEXT_DATA.length}</div><div class="stat-label">Queued</div></div>
+    <div class="stat"><div class="stat-val">${NEXT_DATA.filter(r => r.priority && r.priority !== "none").length}</div><div class="stat-label">Prioritized</div></div>
+    <div class="stat"><div class="stat-val">${actionable}</div><div class="stat-label">Next Steps</div></div>
+    <div class="stat"><div class="stat-val">${NEXT_DATA.filter(r => r.state === "active").length}</div><div class="stat-label">Active</div></div>
+  `;
+  document.getElementById("subtitle").textContent = `Ranked by pj next | ${NEXT_META.total ?? NEXT_DATA.length} recommendations${NEXT_META.latency_ms === undefined ? "" : ` | ${NEXT_META.latency_ms} ms`}`;
+}
+
+function switchView(view) {
+  activeView = view;
+  document.querySelectorAll(".tab-button").forEach(button => {
+    button.classList.toggle("active", button.dataset.view === view);
+  });
+  document.getElementById("censusView").hidden = view !== "census";
+  document.getElementById("nextView").hidden = view !== "next";
+  if (view === "next") {
+    if (!nextLoaded) loadNextQueue(false);
+    else renderNextQueue();
+  } else {
+    render();
+  }
+}
+
 async function loadData(force = false) {
   const error = document.getElementById("error");
   try {
@@ -763,13 +853,34 @@ async function loadData(force = false) {
   }
 }
 
-document.querySelectorAll("th").forEach(th => {
+async function loadNextQueue(force = false) {
+  const error = document.getElementById("error");
+  try {
+    const response = await fetch(`/api/next?limit=20${force ? "&refresh=1" : ""}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!payload.success) throw new Error(payload.meta?.error || "request failed");
+    NEXT_DATA = payload.data || [];
+    NEXT_META = payload.meta || {};
+    nextLoaded = true;
+    error.style.display = "none";
+    renderNextQueue();
+  } catch (err) {
+    error.textContent = String(err);
+    error.style.display = "block";
+  }
+}
+
+document.querySelectorAll("#censusTable th").forEach(th => {
   th.addEventListener("click", () => {
     const key = th.dataset.key;
     if (sortKey === key) sortDir *= -1;
     else { sortKey = key; sortDir = ["last_active_ts", "first_session_ts", "sessions", "duration_hrs", "beads", "has_git"].includes(key) ? -1 : 1; }
     render();
   });
+});
+
+document.querySelectorAll(".tab-button").forEach(button => {
+  button.addEventListener("click", () => switchView(button.dataset.view || "census"));
 });
 
 ["tableFilter", "stateFilter", "catFilter", "originFilter", "beadsOnly"].forEach(id => {
@@ -786,6 +897,13 @@ document.getElementById("tbody").addEventListener("click", event => {
   if (event.target.closest("a")) return;
   const row = event.target.closest("tr[data-project-id]");
   if (row) openProjectDetail(row.dataset.projectId);
+});
+document.getElementById("nextTbody").addEventListener("click", event => {
+  event.preventDefault();
+  const target = event.target.closest("[data-project-id]");
+  const row = event.target.closest("tr[data-project-id]");
+  const projectId = target?.dataset.projectId || row?.dataset.projectId;
+  if (projectId) openProjectDetail(projectId);
 });
 document.getElementById("drawerClose").addEventListener("click", closeDrawer);
 document.getElementById("drawerBackdrop").addEventListener("click", closeDrawer);
@@ -813,9 +931,22 @@ document.getElementById("projectDrawer").addEventListener("change", event => {
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") closeDrawer();
 });
-document.getElementById("refresh").addEventListener("click", () => loadData(true));
-document.addEventListener("visibilitychange", () => { if (!document.hidden) loadData(false); });
-setInterval(() => { if (!document.hidden) loadData(false); }, 5 * 60 * 1000);
+document.getElementById("refresh").addEventListener("click", () => {
+  if (activeView === "next") loadNextQueue(true);
+  else loadData(true);
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    if (activeView === "next") loadNextQueue(false);
+    else loadData(false);
+  }
+});
+setInterval(() => {
+  if (!document.hidden) {
+    if (activeView === "next") loadNextQueue(false);
+    else loadData(false);
+  }
+}, 5 * 60 * 1000);
 loadData(false);
 </script>
 </body>
@@ -898,6 +1029,10 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
                 snapshot = census_cache.get(force=force, include_ports=include_ports)
                 body = envelope.to_json(envelope.ok(snapshot["rows"], **snapshot["meta"]))
                 self._send_text(body, "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/next":
+                self._handle_api_get(self._handle_next, parse_qs(parsed.query))
                 return
 
             if parsed.path == "/api/search":
@@ -1000,6 +1135,20 @@ def make_handler(census_cache: CensusCache) -> type[BaseHTTPRequestHandler]:
                     limit=_int_param(params, "limit", 20),
                     latency_ms=latency_ms,
                     **({"hint": hint} if hint else {}),
+                )
+            )
+
+        def _handle_next(self, params: dict[str, list[str]]) -> None:
+            started = time.monotonic()
+            limit = _int_param(params, "limit", 5)
+            projects, _ = discover.discover(limit=9999)
+            scored = schedule.score_projects(projects)[:limit]
+            self._send_json(
+                envelope.ok(
+                    scored,
+                    limit=limit,
+                    total=len(scored),
+                    latency_ms=int((time.monotonic() - started) * 1000),
                 )
             )
 

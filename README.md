@@ -278,6 +278,7 @@ Read endpoints:
 | `GET /api/health` | `pj census status` health check | `{ "status": "running" }` | none |
 | `GET /api/census?refresh=1` | `pj census` | array of normalized census rows | census summary fields such as `total`, `state_counts`, `category_counts`, `origin_counts`, `session_total`, `duration_hrs_total`, `generated_at` |
 | `GET /api/census?refresh=1&include_ports=1` | `pj census --include-ports` | array of normalized census rows with optional `ports` arrays | census summary fields plus optional `ports_included`, `ports_total`, `ports_sources`, and `warnings` |
+| `GET /api/next?limit=5` | `pj next --limit 5` | array of scored project recommendations | `total`, `limit`, `latency_ms` |
 | `GET /api/ports?project=name-or-id-or-path` | `pj ports [--project <query>]` | array of port records | `total`, optional `project`, `sources`, `warnings`, `latency_ms` |
 | `GET /api/search?q=term&q=other&limit=20&sort=newest&project=name&match=any&regex=0` | `pj search ...` | array of project search matches | `query`, `project`, `match`, `regex`, `sort`, `total`, `limit`, `latency_ms`, optional `hint` |
 | `GET /api/show?project=name-or-id&sessions=10` | `pj show <project>` | project object with `sessions` and `resume_cmd` | `latency_ms` |

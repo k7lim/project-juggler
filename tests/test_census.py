@@ -385,6 +385,35 @@ def test_census_server_search_endpoint_maps_cli_query_semantics():
     assert payload["meta"]["total"] == 1
 
 
+def test_census_server_next_endpoint_uses_schedule_flow():
+    projects = [
+        {"id": "p1", "name": "alpha", "path": "/tmp/alpha", "state": "active", "priority": "high"},
+        {"id": "p2", "name": "beta", "path": "/tmp/beta", "state": "stale", "priority": "none"},
+    ]
+    scored = [
+        {**projects[0], "score": 0.9, "reason": "high priority", "factors": {"priority": 1.0}},
+        {**projects[1], "score": 0.4, "reason": "baseline score", "factors": {"priority": 0.0}},
+    ]
+    server, thread = _test_server()
+    try:
+        with mock.patch("pj.census_server.discover.discover", return_value=(projects, 2)) as discover_mock, \
+             mock.patch("pj.census_server.schedule.score_projects", return_value=scored) as score_mock:
+            status, payload = _api_request(server, "/api/next?limit=1")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert status == 200
+    discover_mock.assert_called_once_with(limit=9999)
+    score_mock.assert_called_once_with(projects)
+    assert payload["success"] is True
+    assert payload["data"] == scored[:1]
+    assert payload["meta"]["limit"] == 1
+    assert payload["meta"]["total"] == 1
+    assert "latency_ms" in payload["meta"]
+
+
 def test_resolve_project_detail_uses_discovery_rules_for_id_name_and_path():
     projects = [
         {
@@ -427,6 +456,21 @@ def test_census_dashboard_has_live_search_table_filter_and_detail_drawer():
     assert "resume_cmd" in HTML
 
 
+def test_census_dashboard_has_next_queue_tab_and_preserves_census_view():
+    assert 'data-view="census">Census</button>' in HTML
+    assert 'data-view="next">Next Queue</button>' in HTML
+    assert 'id="censusView"' in HTML
+    assert 'id="nextView" hidden' in HTML
+    assert '<table id="censusTable">' in HTML
+    assert '<table id="nextTable">' in HTML
+    assert 'fetch(`/api/next?limit=20${force ? "&refresh=1" : ""}`' in HTML
+    assert "function renderNextQueue()" in HTML
+    assert 'class="project-link" data-project-id="${esc(ref)}"' in HTML
+    assert "openProjectDetail(projectId)" in HTML
+    assert 'document.querySelectorAll("#censusTable th")' in HTML
+    assert 'if (activeView === "next") loadNextQueue(true);' in HTML
+
+
 def test_census_dashboard_has_lazy_session_transcript_viewer():
     assert 'class="transcript-open" data-session-id="${esc(sessionId)}"' in HTML
     assert 'class="transcript-roles" aria-label="Transcript roles"' in HTML
@@ -454,7 +498,8 @@ def test_census_dashboard_has_annotation_actions_and_archive_confirmation():
     assert 'if (action === "archive" && !confirmArchive?.checked)' in HTML
     assert 'fetch(`/api/annotations/${action}`' in HTML
     assert 'method: "POST"' in HTML
-    assert "await loadData(true)" in HTML
+    assert 'if (activeView === "next") await loadNextQueue(true);' in HTML
+    assert "else await loadData(true)" in HTML
     assert "if (activeProjectId) await openProjectDetail(activeProjectId)" in HTML
     assert 'archiveButton.disabled = !confirmArchive.checked' in HTML
 
