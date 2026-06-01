@@ -96,6 +96,12 @@ HTML = """<!DOCTYPE html>
   .m-haiku { color: var(--text-dim); }
   .beads-dot { color: var(--green); font-weight: bold; }
   .git-dot { color: var(--text-dim); }
+  .live-links { display: flex; gap: 4px; }
+  .live-link {
+    color: var(--cyan); border: 1px solid var(--border); border-radius: 3px;
+    padding: 0 4px; text-decoration: none; font-size: 10px;
+  }
+  .live-link:hover { border-color: var(--cyan); color: var(--text-bright); }
   .note-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); font-size: 11px; }
   .error { color: var(--red); margin-bottom: 10px; display: none; }
   .search-panel {
@@ -227,6 +233,7 @@ HTML = """<!DOCTYPE html>
   <th data-key="models">Models <span class="arr">&#x25B2;&#x25BC;</span></th>
   <th data-key="first_session_ts" data-type="num">Started <span class="arr">&#x25B2;&#x25BC;</span></th>
   <th data-key="last_active_ts" data-type="num">Last Active <span class="arr">&#x25B2;&#x25BC;</span></th>
+  <th data-key="live_port_count" data-type="num">Live <span class="arr">&#x25B2;&#x25BC;</span></th>
   <th data-key="beads" data-type="num">Bd <span class="arr">&#x25B2;&#x25BC;</span></th>
   <th data-key="has_git" data-type="num">Git <span class="arr">&#x25B2;&#x25BC;</span></th>
   <th data-key="priority">Pri <span class="arr">&#x25B2;&#x25BC;</span></th>
@@ -270,6 +277,20 @@ function durCell(hrs) {
 
 function sessCell(n) {
   return n > 20 ? `<span class="badge badge-hot">${n}</span>` : n;
+}
+
+function compactLiveUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.host;
+  } catch {
+    return String(url ?? "");
+  }
+}
+
+function liveUrlsCell(urls) {
+  if (!Array.isArray(urls) || urls.length === 0) return "";
+  return `<div class="live-links">${urls.map(url => `<a class="live-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(compactLiveUrl(url))}</a>`).join("")}</div>`;
 }
 
 function updateSelect(id, values, labels) {
@@ -526,6 +547,7 @@ function render() {
       <td>${mtags(r.models)}</td>
       <td>${esc(r.first_session)}</td>
       <td>${esc(r.last_active)}</td>
+      <td>${liveUrlsCell(r.live_urls)}</td>
       <td class="beads-dot">${r.has_beads ? (r.beads > 0 ? r.beads : "&#10003;") : ""}</td>
       <td class="git-dot">${r.has_git ? "&#10003;" : ""}</td>
       <td>${r.priority !== "none" ? esc(r.priority) : ""}</td>
@@ -558,7 +580,7 @@ function render() {
 async function loadData(force = false) {
   const error = document.getElementById("error");
   try {
-    const response = await fetch(`/api/census${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+    const response = await fetch(`/api/census?include_ports=1${force ? "&refresh=1" : ""}`, { cache: "no-store" });
     const payload = await response.json();
     if (!payload.success) throw new Error(payload.meta?.error || "request failed");
     DATA = payload.data;
@@ -596,6 +618,7 @@ document.getElementById("searchResults").addEventListener("click", event => {
   navigator.clipboard?.writeText(button.dataset.cmd || "");
 });
 document.getElementById("tbody").addEventListener("click", event => {
+  if (event.target.closest("a")) return;
   const row = event.target.closest("tr[data-project-id]");
   if (row) openProjectDetail(row.dataset.projectId);
 });

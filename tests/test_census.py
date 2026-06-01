@@ -426,6 +426,23 @@ def test_census_dashboard_has_live_search_table_filter_and_detail_drawer():
     assert "resume_cmd" in HTML
 
 
+def test_census_dashboard_requests_server_provided_live_urls():
+    assert 'fetch(`/api/census?include_ports=1${force ? "&refresh=1" : ""}`' in HTML
+    assert "liveUrlsCell(r.live_urls)" in HTML
+    assert "r.ports" not in HTML
+    assert "fetch(`http" not in HTML
+
+
+def test_census_dashboard_renders_compact_live_links_cleanly():
+    assert '<th data-key="live_port_count" data-type="num">Live' in HTML
+    assert 'if (!Array.isArray(urls) || urls.length === 0) return "";' in HTML
+    assert 'href="${esc(url)}"' in HTML
+    assert 'target="_blank" rel="noopener noreferrer"' in HTML
+    assert "compactLiveUrl(url)" in HTML
+    assert "parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.host" in HTML
+    assert 'if (event.target.closest("a")) return;' in HTML
+
+
 def test_census_server_show_chats_and_chat_endpoints_map_to_session_store():
     project = {"id": "abc123", "name": "proj", "path": "/tmp/proj", "agent": "codex"}
     sessions = [{"session_id": "sess-1", "agent": "codex", "title": "Build API"}]
