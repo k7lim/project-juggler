@@ -5,7 +5,7 @@ import sys
 import time
 
 from . import __version__
-from . import annotate, discover, envelope, pretty, resume, schedule
+from . import annotate, discover, envelope, pretty, resume, runtime_ports, schedule
 from . import search as search_mod
 from .project_sessions import project_session_data
 from .session_store import get_store
@@ -246,6 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chats_p.add_argument("--pretty", action="store_true", help="Human-readable output")
     chats_p.add_argument("--limit", type=int, default=20, help="Max sessions to show (default: 20)")
+
+    ports_p = sub.add_parser("ports", help="Discover local listening TCP ports")
+    ports_p.add_argument("--project", help="Filter to project name, path, or ID prefix")
 
     census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
     census_p.add_argument(
@@ -554,6 +557,13 @@ def _cmd_census(args: argparse.Namespace) -> None:
     print(envelope.to_json(envelope.ok(snap["rows"], **snap["meta"])))
 
 
+def _cmd_ports(args: argparse.Namespace) -> None:
+    env = runtime_ports.ports(args.project)
+    print(envelope.to_json(env))
+    if not env.get("success"):
+        sys.exit(1)
+
+
 def _cmd_annotate(action) -> None:
     start = time.monotonic()
     event = action()
@@ -606,5 +616,7 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_chat(args)
     elif args.command == "chats":
         _cmd_chats(args)
+    elif args.command == "ports":
+        _cmd_ports(args)
     elif args.command == "census":
         _cmd_census(args)
