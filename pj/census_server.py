@@ -167,6 +167,15 @@ HTML = """<!DOCTYPE html>
   .session-card { border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--bg); }
   .session-card .session-title { font-weight: 650; overflow-wrap: anywhere; }
   .session-extra { color: var(--text-dim); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
+  .transcript-controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
+  .transcript-controls select { max-width: 126px; }
+  .transcript-controls input[type="text"] { width: 58px; }
+  .transcript-view { display: none; margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .transcript-view.open { display: grid; gap: 7px; }
+  .transcript-message { border-left: 2px solid var(--border); padding-left: 7px; min-width: 0; }
+  .transcript-role { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .transcript-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+  .transcript-error { color: var(--red); }
   tr { cursor: pointer; }
   tr.selected { background: rgba(88,166,255,0.1); }
   @media (max-width: 720px) {
@@ -380,6 +389,7 @@ function sessionActivityTime(session) {
 
 function renderDetailSession(session) {
   const title = session.title || "(untitled)";
+  const sessionId = session.session_id || "";
   const sid = session.session_id ? String(session.session_id).slice(0, 12) : "";
   const bits = [
     session.agent,
@@ -392,11 +402,84 @@ function renderDetailSession(session) {
     listText((session.versions || []).map(v => `v${v}`)),
     durationText(session.duration_secs),
   ].filter(Boolean);
+  const controls = sessionId ? `<div class="transcript-controls">
+      <button class="transcript-open" data-session-id="${esc(sessionId)}">Open</button>
+      <select class="transcript-roles" aria-label="Transcript roles">
+        <option value="user,assistant">User + assistant</option>
+        <option value="">All roles</option>
+        <option value="user">User</option>
+        <option value="assistant">Assistant</option>
+      </select>
+      <label>Last <input type="text" class="transcript-last" value="50" inputmode="numeric" aria-label="Last messages"></label>
+      <label><input type="checkbox" class="transcript-hide-tools" checked> Hide tools</label>
+    </div>
+    <div class="transcript-view" data-session-id="${esc(sessionId)}"></div>` : "";
   return `<article class="session-card">
     <div class="session-title">${esc(title)}</div>
     ${bits.length ? `<div class="session-meta">${esc(bits.join(" · "))}</div>` : ""}
     ${extras.length ? `<div class="session-extra">${esc(extras.join(" | "))}</div>` : ""}
+    ${controls}
   </article>`;
+}
+
+function messageText(content) {
+  if (content === undefined || content === null) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(item => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") return item.text || item.content || JSON.stringify(item);
+      return String(item ?? "");
+    }).filter(Boolean).join("\\n");
+  }
+  if (typeof content === "object") return content.text || content.content || JSON.stringify(content, null, 2);
+  return String(content);
+}
+
+function renderTranscript(messages) {
+  if (!messages.length) return `<div class="transcript-message"><div class="transcript-content">No messages</div></div>`;
+  return messages.map(message => {
+    const role = message.role || "message";
+    return `<div class="transcript-message">
+      <div class="transcript-role">${esc(role)}</div>
+      <div class="transcript-content">${esc(messageText(message.content))}</div>
+    </div>`;
+  }).join("");
+}
+
+async function openTranscript(button) {
+  const card = button.closest(".session-card");
+  const sessionId = button.dataset.sessionId;
+  const view = card?.querySelector(".transcript-view");
+  if (!sessionId || !card || !view) return;
+
+  const roles = card.querySelector(".transcript-roles")?.value || "";
+  const last = card.querySelector(".transcript-last")?.value.trim() || "";
+  const hideTools = card.querySelector(".transcript-hide-tools")?.checked;
+  const params = new URLSearchParams();
+  if (roles) params.set("roles", roles);
+  if (/^\\d+$/.test(last) && Number(last) > 0) params.set("last", last);
+  if (hideTools) params.set("no_tools", "1");
+
+  button.disabled = true;
+  button.textContent = "Loading";
+  view.classList.add("open");
+  view.innerHTML = `<div class="transcript-message"><div class="transcript-content">Loading...</div></div>`;
+  try {
+    const query = params.toString();
+    const response = await fetch(`/api/chat/${encodeURIComponent(sessionId)}${query ? `?${query}` : ""}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!document.body.contains(view)) return;
+    if (!payload.success) throw new Error(payload.meta?.error || "transcript failed");
+    view.innerHTML = renderTranscript((payload.data || {}).messages || []);
+    button.textContent = "Reload";
+  } catch (err) {
+    if (!document.body.contains(view)) return;
+    view.innerHTML = `<div class="transcript-message transcript-error"><div class="transcript-content">${esc(err)}</div></div>`;
+    button.textContent = "Retry";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderProjectDetail(project) {
@@ -626,8 +709,12 @@ document.getElementById("drawerClose").addEventListener("click", closeDrawer);
 document.getElementById("drawerBackdrop").addEventListener("click", closeDrawer);
 document.getElementById("projectDrawer").addEventListener("click", event => {
   const button = event.target.closest(".copy-resume");
-  if (!button) return;
-  navigator.clipboard?.writeText(button.dataset.cmd || "");
+  if (button) {
+    navigator.clipboard?.writeText(button.dataset.cmd || "");
+    return;
+  }
+  const transcriptButton = event.target.closest(".transcript-open");
+  if (transcriptButton) openTranscript(transcriptButton);
 });
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") closeDrawer();

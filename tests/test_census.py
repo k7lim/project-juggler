@@ -426,6 +426,21 @@ def test_census_dashboard_has_live_search_table_filter_and_detail_drawer():
     assert "resume_cmd" in HTML
 
 
+def test_census_dashboard_has_lazy_session_transcript_viewer():
+    assert 'class="transcript-open" data-session-id="${esc(sessionId)}"' in HTML
+    assert 'class="transcript-roles" aria-label="Transcript roles"' in HTML
+    assert '<option value="user,assistant">User + assistant</option>' in HTML
+    assert 'class="transcript-last" value="50"' in HTML
+    assert 'class="transcript-hide-tools" checked' in HTML
+    assert "async function openTranscript(button)" in HTML
+    assert 'fetch(`/api/chat/${encodeURIComponent(sessionId)}${query ? `?${query}` : ""}`' in HTML
+    assert 'params.set("roles", roles)' in HTML
+    assert 'params.set("last", last)' in HTML
+    assert 'params.set("no_tools", "1")' in HTML
+    assert "renderTranscript((payload.data || {}).messages || [])" in HTML
+    assert 'document.getElementById("projectDrawer").addEventListener("click"' in HTML
+
+
 def test_census_dashboard_requests_server_provided_live_urls():
     assert 'fetch(`/api/census?include_ports=1${force ? "&refresh=1" : ""}`' in HTML
     assert "liveUrlsCell(r.live_urls)" in HTML
