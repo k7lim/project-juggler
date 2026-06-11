@@ -1083,6 +1083,31 @@ def test_pretty_search_session_age_uses_ended_at(capsys):
     assert "5d ago" not in out
 
 
+def test_pretty_search_content_session_shows_snippet(capsys):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    results = [{
+        "name": "skillmonger",
+        "state": "active",
+        "path": "/tmp/skillmonger",
+        "match_fields": ["content"],
+        "matching_sessions": [{
+            "session_id": "session-123456",
+            "agent": "codex",
+            "title": "# AGENTS.md instructions for /tmp/skillmonger",
+            "snippet": "...audit the scientific-paper-searcher skill for CLI readiness...",
+            "started_at": now_iso,
+            "ended_at": now_iso,
+            "match_type": "content",
+        }],
+    }]
+
+    pretty.print_search(results, "scientific-paper-searcher")
+    out = capsys.readouterr().out
+
+    assert "scientific-paper-searcher skill" in out
+    assert "# AGENTS.md instructions" not in out
+
+
 # --- cli next/search ---
 
 def test_cli_next_json(capsys):
@@ -2377,6 +2402,44 @@ def test_search_integration_merges_content_with_name():
     assert "name" in results[0]["match_fields"]
     assert "content" in results[0]["match_fields"]
     assert "snippets" in results[0]
+
+
+def test_search_filters_generated_skill_inventory_content():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fake_projects = [
+        {"path": "/proj/real", "agents": ["codex"], "session_count": 1, "last_active": now_iso},
+        {"path": "/proj/noise", "agents": ["claude"], "session_count": 1, "last_active": now_iso},
+    ]
+    content_hits = [
+        {
+            "path": "/proj/real",
+            "session_id": "real",
+            "agent": "codex",
+            "title": "research prompt",
+            "snippet": "Use scientific-paper-searcher to scan attention research.",
+            "started_at": now_iso,
+            "match_type": "like",
+        },
+        {
+            "path": "/proj/noise",
+            "session_id": "noise",
+            "agent": "claude",
+            "title": "# AGENTS.md instructions",
+            "snippet": "| review | User | ~140 | | scientific-paper-searcher | User | ~70 |",
+            "started_at": now_iso,
+            "match_type": "like",
+        },
+    ]
+
+    with mock.patch.object(cass_facade, "list_projects", return_value=fake_projects), \
+         mock.patch.object(cache, "load", return_value=None), \
+         mock.patch.object(cache, "save"), \
+         mock.patch("pj.discover.annotations_path", return_value=Path("/nonexistent")), \
+         mock.patch.object(cass_facade, "search_sessions", return_value=[]), \
+         mock.patch.object(cass_facade, "search_content", return_value=content_hits):
+        results = search_mod.search("scientific-paper-searcher")
+
+    assert [r["path"] for r in results] == ["/proj/real"]
 
 
 # --- session_store: contract tests ---

@@ -318,6 +318,8 @@ def _merge_content_hits(
         path = hit["path"]
         sid = str(hit.get("session_id", ""))
         snippet = hit.get("snippet", "")
+        if _is_generated_skill_inventory_snippet(snippet):
+            continue
         match_count = hit.get("match_count") or _count_matches(snippet, terms, patterns)
         sess_entry = {
             "session_id": hit.get("session_id", ""),
@@ -534,3 +536,11 @@ def _first_match(
         if idx != -1
     ]
     return min(positions) if positions else (-1, 0)
+
+
+def _is_generated_skill_inventory_snippet(snippet: str) -> bool:
+    lower = snippet.lower()
+    if " | user | ~" in lower:
+        return True
+    token_rows = re.findall(r"\b[a-z0-9][a-z0-9-]+:\s+\S+\s+tokens\b", lower)
+    return len(token_rows) >= 2

@@ -478,7 +478,7 @@ def print_search(results: list[dict], query: str | list[str], regex: bool = Fals
         path = p.get("path", "")
         if sessions:
             for s in sessions[:3]:
-                title = (s.get("title") or "(untitled)").replace("\n", " ")[:80]
+                title = _search_session_display(s)
                 when = _relative_time(_session_activity_time(s))
                 sid = str(s.get("session_id", ""))[:12]
                 agent = s.get("agent", "")
@@ -497,3 +497,10 @@ def print_search(results: list[dict], query: str | list[str], regex: bool = Fals
                 for t in titles[:2]:
                     display = t.replace("\n", " ")[:200] if t else ""
                     print(f"    {_highlight(display, query)}")
+
+
+def _search_session_display(session: dict) -> str:
+    """Prefer matched content context over generic session titles."""
+    if session.get("match_type") == "content" and session.get("snippet"):
+        return str(session.get("snippet", "")).replace("\n", " ")[:200]
+    return (session.get("title") or "(untitled)").replace("\n", " ")[:80]
