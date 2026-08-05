@@ -235,6 +235,7 @@ HTML = """<!DOCTYPE html>
   <select id="catFilter"><option value="">All categories</option></select>
   <select id="originFilter"><option value="">All origins</option></select>
   <label><input type="checkbox" id="beadsOnly"> Beads</label>
+  <label><input type="checkbox" id="includeArchived"> Archived</label>
   <span id="row-count"></span>
 </div>
 
@@ -376,8 +377,11 @@ function filteredRows() {
   const cf = document.getElementById("catFilter").value;
   const of_ = document.getElementById("originFilter").value;
   const bf = document.getElementById("beadsOnly").checked;
+  const includeArchived = document.getElementById("includeArchived").checked;
+  const showArchived = includeArchived || sf === "archived";
 
   let rows = DATA.filter(r => {
+    if (!showArchived && r.state === "archived") return false;
     if (q && !r.name.toLowerCase().includes(q) && !r.path.toLowerCase().includes(q) && !r.note.toLowerCase().includes(q)) return false;
     if (sf && r.state !== sf) return false;
     if (cf && r.category !== cf) return false;
@@ -883,7 +887,7 @@ document.querySelectorAll(".tab-button").forEach(button => {
   button.addEventListener("click", () => switchView(button.dataset.view || "census"));
 });
 
-["tableFilter", "stateFilter", "catFilter", "originFilter", "beadsOnly"].forEach(id => {
+["tableFilter", "stateFilter", "catFilter", "originFilter", "beadsOnly", "includeArchived"].forEach(id => {
   const el = document.getElementById(id);
   el.addEventListener(el.tagName === "INPUT" && el.type === "text" ? "input" : "change", render);
 });

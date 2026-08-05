@@ -481,6 +481,14 @@ def test_census_dashboard_has_live_search_table_filter_and_detail_drawer():
     assert "resume_cmd" in HTML
 
 
+def test_census_dashboard_hides_archived_projects_by_default():
+    assert 'id="includeArchived"' in HTML
+    assert 'const includeArchived = document.getElementById("includeArchived").checked;' in HTML
+    assert 'const showArchived = includeArchived || sf === "archived";' in HTML
+    assert 'if (!showArchived && r.state === "archived") return false;' in HTML
+    assert '"includeArchived"].forEach(id =>' in HTML
+
+
 def test_census_dashboard_has_next_queue_tab_and_preserves_census_view():
     assert 'data-view="census">Census</button>' in HTML
     assert 'data-view="next">Next Queue</button>' in HTML
