@@ -361,6 +361,46 @@ If choosing a packaged Codex skill, specify the exact skill path, required
 `SKILL.md` frontmatter fields (`name: project-juggler`, `description: ...`),
 and whether install/discovery is project-local, packaged, or both.
 
+#### Decision (2026-08-04)
+
+- **Chosen skill path**: `skillmonger/skills/project-juggler/` in the
+  `~/Development/host/skillmonger` repo, holding `SKILL.md`, `CONFIG.yaml`, and
+  `MEMO.md`. The project-juggler repo does not carry the skill.
+- **Distribution/install expectation**: `scripts/deploy-skill.sh
+  skills/project-juggler --global`, which copies to
+  `~/.local/share/skillmonger/skills/project-juggler` and symlinks it into
+  `~/.claude/skills/`, `~/.codex/skills/`, and
+  `~/.config/opencode/skills/`. No installer work is needed here — skillmonger
+  already owns every other skill on this machine the same way.
+- **`AGENTS.md` reference**: no. Skill discovery is automatic once deployed, and
+  a pointer from the project-juggler repo would imply the skill ships with the
+  CLI, which it does not. The skill points back at this plan instead.
+- **Required frontmatter**: `name: project-juggler` (must match the directory
+  name; lowercase, hyphens, ≤64 chars) and a `description` ≤1024 chars naming
+  both what it does and when to trigger. `metadata.short-description` is the
+  local convention. `scripts/validate-skill.sh` enforces these.
+- **Rationale**: a zero-context agent discovers the skill because it is already
+  in its skills directory — no repo checkout, no `AGENTS.md` read, no packaging
+  convention to infer. Keeping it out of the project-juggler repo also avoids
+  the version-coupling question: the skill describes the installed `pj`, which
+  can be older or newer than any given checkout.
+- **Alternatives considered**:
+  - *Project-local docs only* — rejected: agents outside the repo, which is most
+    of the time, would never see it. The value of this skill is cross-project.
+  - *Packaged skill in the project-juggler repo* (`skills/project-juggler/`) —
+    rejected: gives the CLI and skill a single source of truth, but requires a
+    bespoke install step, and nothing else on this machine is distributed that
+    way.
+  - *Both, repo canonical plus skillmonger deploy* — rejected for now: two
+    copies to keep in sync for no discovery benefit. Revisit if `pj` is ever
+    published for others, where the repo copy becomes the shippable artifact.
+  - *Referencing the skill from `AGENTS.md`* — rejected as above; recorded here
+    so a later agent does not re-add the pointer.
+
+Task C is implemented against this decision. Note that the skill deliberately
+omits `pj health` and `PJ_REMOTE_URL`, since neither exists in `pj` 0.3.1 and
+Task A is still open; see the Task C note below.
+
 ### Task C: Add Project-Juggler Agent Skill
 
 Type: AFK
@@ -425,6 +465,25 @@ Out:
 
 Do not include agent framework prompts, orchestration protocols, or behavior
 that would mutate annotations unless the user explicitly asks for that mutation.
+
+#### Status (2026-08-04): implemented, remote half deferred
+
+The skill exists at the Task B decision path and is deployed. It was written
+against `pj` 0.3.1's real command surface, so it covers `list`, `next`, `search`,
+`show`, `chats`, `chat`, `resume`, and `ports` as sensors, `note`, `tag`,
+`prioritize`, `archive` as actuators, the JSON-envelope and `--pretty` rule, and
+the sandbox-visibility caveat.
+
+Two acceptance criteria are intentionally unmet, because meeting them would teach
+agents commands that do not exist:
+
+- `PJ_REMOTE_URL=http://host.docker.internal:8765` is not shown. Remote mode is
+  unimplemented (Tasks H–K) and `pj health` does not exist (Task E).
+- No token names appear, since Task A is still open.
+
+Instead, the skill states plainly that there is no remote mode and tells agents
+to ask the user to run the query on the host. Revisit the skill after Task A and
+Task E land; that is the point at which the remote workflow becomes real.
 
 ### Task D: Decide `/api/ports` HTTP Contract
 
@@ -1082,7 +1141,9 @@ docs only publish a workflow that is implemented and safe.
 - Should remote mode be explicit only (`PJ_REMOTE_URL`) or should `pj` try
   `host.docker.internal` automatically when it detects yolobox?
 - Should read auth be mandatory for any non-loopback bind, or only warned?
-- Where should the shipped skill live: project root `SKILL.md`, `skills/pj/`,
-  or a packaged Codex skill directory?
+- ~~Where should the shipped skill live: project root `SKILL.md`, `skills/pj/`,
+  or a packaged Codex skill directory?~~ Resolved 2026-08-04 — see the Task B
+  decision: skillmonger-managed at `skillmonger/skills/project-juggler/`,
+  deployed by symlink into the per-agent skill directories.
 - Should `/api/search` grow field selection, or is `limit` plus drill-down enough
   for the first sandbox-agent workflow?
