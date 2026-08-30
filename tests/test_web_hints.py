@@ -61,3 +61,14 @@ def test_ignores_projects_without_web_evidence(tmp_path):
 
     assert web_hints.detect(str(tmp_path)) is None
     assert web_hints.detect(str(tmp_path / "missing")) is None
+
+
+def test_unreadable_project_root_yields_no_hint(tmp_path, monkeypatch):
+    # A sandbox profile denies other workspaces with EPERM, not ENOENT; pathlib
+    # does not swallow that, and discovery must not abort on one such project.
+    def _deny(self):
+        raise PermissionError(1, "Operation not permitted", str(self))
+
+    monkeypatch.setattr(web_hints.Path, "is_dir", _deny)
+
+    assert web_hints.detect(str(tmp_path)) is None

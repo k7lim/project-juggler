@@ -129,16 +129,22 @@ def _static_html_evidence(path: Path) -> list[str]:
 def detect(path: str) -> dict[str, Any] | None:
     """Return a web-app hint when static project files provide evidence."""
     root = Path(path)
-    if not root.is_dir():
-        return None
+    try:
+        if not root.is_dir():
+            return None
 
-    evidence = (
-        _package_json_evidence(root)
-        + _config_evidence(root)
-        + _python_import_evidence(root)
-        + _python_dependency_evidence(root)
-        + _static_html_evidence(root)
-    )
+        evidence = (
+            _package_json_evidence(root)
+            + _config_evidence(root)
+            + _python_import_evidence(root)
+            + _python_dependency_evidence(root)
+            + _static_html_evidence(root)
+        )
+    except OSError:
+        # A project root the process may not stat (e.g. another workspace
+        # denied by a sandbox profile, EPERM rather than ENOENT). No evidence,
+        # no hint; discovery must not abort on it.
+        return None
     if not evidence:
         return None
 
