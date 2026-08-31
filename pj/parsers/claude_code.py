@@ -53,6 +53,24 @@ def _project_dir_from_path(path: str) -> str:
     return os.path.basename(os.path.dirname(path))
 
 
+_WORKTREE_MARKER = os.sep + ".claude" + os.sep + "worktrees" + os.sep
+
+
+def _normalize_workspace(path: str) -> str:
+    """Fold a Claude Code worktree path back into its parent repository.
+
+    Subagents spawned with worktree isolation run in
+    ``<repo>/.claude/worktrees/<name>`` (``agent-<id>`` for Agent-tool
+    spawns), and record that as ``cwd``. Treating each worktree as its own
+    project clutters the list with throwaway ``agent-<hex>`` entries, so
+    map it back to ``<repo>``.
+    """
+    idx = path.find(_WORKTREE_MARKER)
+    if idx <= 0:
+        return path
+    return path[:idx]
+
+
 def _decode_dir_name(dirname: str) -> str:
     """Decode Claude Code's encoded project directory name to a workspace path.
 
@@ -60,7 +78,7 @@ def _decode_dir_name(dirname: str) -> str:
     Ambiguity: hyphens in real dir names are indistinguishable from separators.
     We reconstruct as best we can — /Users/kevin/... is the common prefix.
     """
-    return "/" + dirname.lstrip("-").replace("-", "/")
+    return _normalize_workspace("/" + dirname.lstrip("-").replace("-", "/"))
 
 
 def list_sessions(root: str) -> list[str]:
@@ -179,7 +197,7 @@ def parse_session(path: str) -> NormalizedSession | None:
         # Use cwd if available (more accurate than dir name)
         cwd = obj.get("cwd")
         if cwd:
-            workspace = cwd
+            workspace = _normalize_workspace(cwd)
 
         if msg_type not in ("user", "assistant"):
             continue
@@ -268,7 +286,7 @@ def parse_metadata(path: str) -> NormalizedSession | None:
             session_id = obj.get("sessionId")
         cwd = obj.get("cwd")
         if cwd:
-            workspace = cwd
+            workspace = _normalize_workspace(cwd)
         ts = _parse_timestamp(obj.get("timestamp"))
         if ts:
             timestamps.append(ts)
@@ -360,7 +378,7 @@ def parse_session_tree(
             session_id = obj.get("sessionId")
         cwd = obj.get("cwd")
         if cwd:
-            workspace = cwd
+            workspace = _normalize_workspace(cwd)
 
         parent = obj.get("parentUuid")
 

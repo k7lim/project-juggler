@@ -2684,3 +2684,54 @@ def test_no_cass_imports_in_consumers():
         assert "import cass_facade" not in source, f"{mod_name} still imports cass_facade directly"
         assert "from . import cass_facade" not in source and \
                "from .cass_facade" not in source, f"{mod_name} still imports from cass_facade"
+
+
+# --- Claude Code worktree folding (pj-ofk) ---
+
+
+def test_claude_code_normalize_workspace_folds_worktree():
+    from pj.parsers import claude_code
+
+    repo = "/Users/kevin/Development/proj"
+    assert claude_code._normalize_workspace(
+        f"{repo}/.claude/worktrees/agent-aa1fb8bd9e04ebb77"
+    ) == repo
+    assert claude_code._normalize_workspace(
+        f"{repo}/.claude/worktrees/agent-aa1fb8bd9e04ebb77/sub/dir"
+    ) == repo
+    assert claude_code._normalize_workspace(repo) == repo
+    assert claude_code._normalize_workspace("/") == "/"
+
+
+def test_claude_code_parse_metadata_folds_worktree_cwd(tmp_path):
+    from pj.parsers import claude_code
+
+    repo = "/Users/kevin/Development/proj"
+    worktree = f"{repo}/.claude/worktrees/agent-aa1fb8bd9e04ebb77"
+    project_dir = tmp_path / "projects" / "-Users-kevin-Development-proj"
+    sa_dir = project_dir / "sess-1" / "subagents"
+    sa_dir.mkdir(parents=True)
+    path = sa_dir / "agent-aa1fb8bd9e04ebb77.jsonl"
+    path.write_text(
+        json.dumps({
+            "isSidechain": True,
+            "uuid": "u-1",
+            "parentUuid": None,
+            "agentId": "aa1fb8bd9e04ebb77",
+            "sessionId": "sess-1",
+            "cwd": worktree,
+            "type": "user",
+            "timestamp": "2026-08-31T10:00:00.000Z",
+            "message": {"role": "user", "content": "audit the repo"},
+        }) + "\n"
+    )
+
+    meta = claude_code.parse_metadata(str(path))
+    assert meta is not None
+    assert meta.workspace == repo
+    assert Path(meta.workspace).name == "proj"
+
+    full = claude_code.parse_session(str(path))
+    assert full is not None and full.workspace == repo
+    tree = claude_code.parse_session_tree(str(path))
+    assert tree is not None and tree.workspace == repo
