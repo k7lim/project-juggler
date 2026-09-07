@@ -435,6 +435,13 @@ To add a new agent: create a parser in `pj/parsers/` and add a resume template i
 
 ## Environment variables
 
+The default filesystem backend also discovers Claude Code and Codex sessions in
+`~/.local/share/yolobox/home/.claude/projects` and
+`~/.local/share/yolobox/home/.codex/sessions`. These roots feed both CLI search
+and the census dashboard. Missing directories are ignored; symlink aliases and
+explicit roots pointing to the same directory are scanned only once. For other
+session-store locations, use `PJ_SOURCES` below.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PJ_BACKEND` | `fs` | `cass` to use CASS SQLite backend |

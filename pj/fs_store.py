@@ -53,6 +53,15 @@ def _configured_roots() -> list[tuple[str, object]]:
         for root in parser.detect_roots():
             _add(root, parser)
 
+    # Yolobox keeps agent state in a persistent home outside the host dotdirs.
+    # Use the same canonical-path deduplication as explicit and default roots.
+    sandbox_home = Path.home() / ".local" / "share" / "yolobox" / "home"
+    for relative, parser in (
+        (".claude/projects", claude_code),
+        (".codex/sessions", codex),
+    ):
+        _add(str(sandbox_home / relative), parser)
+
     return pairs
 
 
