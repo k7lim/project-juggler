@@ -20,7 +20,9 @@ from .envelope import ok
 from .parsers import claude_code, codex
 
 SCHEMA_VERSION = "2"
-MAX_LINE = 16 * 1024 * 1024
+# Offline ingestion accommodates image-heavy historical records; request/output
+# bounds remain separate. Text normalization excludes embedded image bytes.
+MAX_LINE = 64 * 1024 * 1024
 MAX_INDEX_FILE = 1024 * 1024 * 1024
 MAX_INDEX_FILES = 100000
 MAX_INDEX_ENTRIES = 500000

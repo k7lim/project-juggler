@@ -207,3 +207,28 @@ def test_index_bounds_large_chat_output_and_unicode_literal_search(tmp_path):
         assert request(server, "/api/chat/large")[0] == 413
         assert request(server, "/api/search?q=%C3%A4bc")[1]["meta"]["total"] == 1
         assert request(server, "/api/search?q=%C3%A4ther")[1]["meta"]["total"] == 1
+
+
+def test_image_heavy_record_preserves_searchable_text_without_indexing_image(tmp_path, monkeypatch):
+    history = codex_file(tmp_path / "history.jsonl", "image-heavy")
+    with history.open("a") as handle:
+        handle.write(json.dumps({"type": "response_item", "payload": {
+            "role": "user", "content": [
+                {"type": "input_text", "text": "visible constellation beside image"},
+                {"type": "input_image", "image_url": "data:image/png;base64," + "a" * (23 * 1024 * 1024)},
+            ]}}) + "\n")
+    original = hashlib.sha256(history.read_bytes()).digest()
+    config = indexed_config(tmp_path, [entry(history)])
+    assert build(config)["sessions"] == 1
+    with running(config) as server:
+        assert request(server, "/api/search?q=constellation")[1]["meta"]["total"] == 1
+        status, chat = request(server, "/api/chat/image-heavy")
+        assert status == 200
+        assert chat["data"]["messages"][-1]["content"] == "visible constellation beside image"
+    assert hashlib.sha256(history.read_bytes()).digest() == original
+    # Bounds remain enforced and a failed refresh leaves the committed snapshot.
+    monkeypatch.setattr(index, "MAX_LINE", 1024)
+    with history.open("a") as handle:
+        handle.write("\n")
+    with pytest.raises(index.IndexError):
+        build(config)
