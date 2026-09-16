@@ -223,6 +223,36 @@ def test_config_requires_protected_owner_and_explicit_corpus(tmp_path):
         service.load_config(str(path))
 
 
+def test_explicit_empty_public_corpus_is_available_and_reveals_nothing(tmp_path):
+    path = config_file(tmp_path, [], "approved-public")
+    config = service.load_config(str(path))
+    assert config["audience"] == "approved-public"
+    assert config["entries"] == []
+
+    with running(path) as server:
+        status, health = request(server, "/api/health")
+        assert status == 200
+        assert health["meta"]["audience"] == "approved-public"
+
+        for target in ("/api/search?q=unapproved", "/api/chats"):
+            status, payload = request(server, target)
+            assert status == 200
+            assert payload["data"] == []
+            assert payload["meta"]["total"] == 0
+            assert payload["meta"]["audience"] == "approved-public"
+
+        assert request(server, "/api/chat/guessed-private-id") == (
+            404,
+            {"success": False, "data": [], "meta": {"error": "not found"}},
+        )
+
+    data = json.loads(path.read_text())
+    data.pop("snapshots")
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        service.load_config(str(path))
+
+
 def test_output_file_limits_and_worker_timeout_cleanup(tmp_path, monkeypatch):
     history = codex_file(tmp_path / "history.jsonl", text="x" * (service.MAX_OUTPUT + 1))
     path = config_file(tmp_path, [entry(history)])

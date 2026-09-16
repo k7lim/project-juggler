@@ -99,10 +99,13 @@ def load_config(path: str) -> dict:
     roots = config.get("roots", [])
     snapshots = config.get("snapshots", [])
     entries = roots if audience == "private" else snapshots
-    if (not isinstance(entries, list) or not entries or
+    private_corpus_invalid = (audience == "private" and
+                              ("roots" not in config or "snapshots" in config or not entries))
+    public_corpus_invalid = (audience == "approved-public" and
+                             ("snapshots" not in config or "roots" in config))
+    if (not isinstance(entries, list) or
             len(entries) > (32 if audience == "private" else MAX_FILES) or
-            (audience == "private" and snapshots) or
-            (audience == "approved-public" and roots)):
+            private_corpus_invalid or public_corpus_invalid):
         raise ValueError("invalid corpus")
     normalized = []
     for entry in entries:
