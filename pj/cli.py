@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
 from . import __version__
-from . import annotate, discover, envelope, pretty, resume, runtime_ports, schedule
+from . import annotate, discover, envelope, pretty, remote, resume, runtime_ports, schedule
 from . import search as search_mod
 from .project_sessions import project_session_data, resolve_project_detail
 from .session_store import get_store
@@ -180,6 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     next_p.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     next_p.add_argument("--pretty", action="store_true", help="Human-readable output")
 
+    sub.add_parser("health", help="Report local or configured remote history capability")
+
     # "show" is the primary name; "status" kept as alias
     show = sub.add_parser("show", help="Drill into a project: sessions, notes, resume cmd")
     show.add_argument("project", nargs="?", help="Project name, path, or ID prefix")
@@ -336,6 +339,41 @@ def _cmd_next(args: argparse.Namespace) -> None:
         print(envelope.to_json(env))
 
 
+def _remote_result(action) -> dict:
+    """Run a remote read and preserve the CLI's one-envelope error contract."""
+    try:
+        result = action()
+    except remote.RemoteError as exc:
+        result = envelope.err(str(exc), source="remote")
+    if not result["success"]:
+        print(envelope.to_json(result))
+        sys.exit(1)
+    return result
+
+
+def _remote_unsupported(command: str) -> None:
+    result = envelope.err(
+        f"{command} is not supported by the configured remote history service",
+        source="remote",
+    )
+    print(envelope.to_json(result))
+    sys.exit(1)
+
+
+def _cmd_health(_args: argparse.Namespace) -> None:
+    if remote.configured():
+        result = _remote_result(remote.health)
+        print(envelope.to_json(result))
+        return
+
+    from . import census_process
+
+    result = envelope.ok(
+        {"mode": "local", "census": census_process.status(), "remote_url": None}
+    )
+    print(envelope.to_json(result))
+
+
 def _cmd_show(args: argparse.Namespace) -> None:
     if not args.project:
         _missing_arg("show")
@@ -357,6 +395,32 @@ def _cmd_show(args: argparse.Namespace) -> None:
 
 
 def _cmd_chats(args: argparse.Namespace) -> None:
+    if remote.configured():
+        if args.here and args.project:
+            result = envelope.err("Use either a project or --here, not both", source="chats")
+            print(envelope.to_json(result))
+            sys.exit(1)
+        if not args.here and not args.project:
+            result = envelope.err(
+                "Remote chats requires an explicit project or --here",
+                source="remote",
+            )
+            print(envelope.to_json(result))
+            sys.exit(1)
+        project_ref = os.path.realpath(os.getcwd()) if args.here else args.project
+        result = _remote_result(lambda: remote.chats(project_ref, limit=args.limit))
+        if args.pretty:
+            project = result["meta"].get("project")
+            if not isinstance(project, dict):
+                project = {
+                    "name": os.path.basename(project_ref.rstrip(os.sep)) or project_ref,
+                    "path": project_ref,
+                }
+            pretty.print_sessions({**project, "sessions": result["data"]})
+        else:
+            print(envelope.to_json(result))
+        return
+
     start = time.monotonic()
     project = _resolve_project_arg(args.project, here=args.here, source="chats")
     status_data = project_session_data(project, args.limit)
@@ -406,6 +470,35 @@ def _cmd_resume(args: argparse.Namespace) -> None:
 def _cmd_search(args: argparse.Namespace) -> None:
     if not args.query:
         _missing_arg("search")
+
+    if remote.configured():
+        if args.project and args.here:
+            result = envelope.err("Use either --project or --here, not both", source="search")
+            print(envelope.to_json(result))
+            sys.exit(1)
+        if args.regex:
+            result = envelope.err(
+                "remote search does not support --regex",
+                source="remote",
+            )
+            print(envelope.to_json(result))
+            sys.exit(1)
+        project_filter = os.path.realpath(os.getcwd()) if args.here else args.project
+        result = _remote_result(
+            lambda: remote.search(
+                args.query,
+                limit=args.limit,
+                sort=args.sort,
+                project=project_filter,
+                match=args.match,
+            )
+        )
+        result["meta"].setdefault("here", args.here)
+        if args.pretty:
+            pretty.print_search(result["data"], args.query, regex=False)
+        else:
+            print(envelope.to_json(result))
+        return
 
     start = time.monotonic()
     project_filter = args.project
@@ -461,6 +554,24 @@ def _cmd_search(args: argparse.Namespace) -> None:
 def _cmd_chat(args: argparse.Namespace) -> None:
     if not args.session_id:
         _missing_arg("chat")
+
+    if remote.configured():
+        result = _remote_result(
+            lambda: remote.chat(
+                args.session_id,
+                include_tools=not args.no_tools,
+                all_branches=args.all_branches,
+                roles=args.roles,
+                limit=args.limit,
+                offset=args.offset,
+                last=args.last,
+            )
+        )
+        if args.pretty:
+            pretty.print_chat(result["data"])
+        else:
+            print(envelope.to_json(result))
+        return
 
     start = time.monotonic()
     roles = set(args.roles.split(",")) if args.roles else None
@@ -594,6 +705,11 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         sys.exit(1)
 
+    if remote.configured() and args.command in {"list", "next", "show", "resume"}:
+        _remote_unsupported(args.command)
+    if remote.configured() and args.command == "census" and args.census_action is None:
+        _remote_unsupported("census")
+
     if args.command == "list":
         _cmd_list(args)
     elif args.command == "note":
@@ -614,6 +730,8 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_annotate(lambda: annotate.tag(args.project, args.tag_name))
     elif args.command == "next":
         _cmd_next(args)
+    elif args.command == "health":
+        _cmd_health(args)
     elif args.command == "show":
         _cmd_show(args)
     elif args.command == "resume":

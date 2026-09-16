@@ -1,5 +1,54 @@
 # Plan: Host-Backed `pj` for Sandbox Agents
 
+## Reconciliation — 2026-09-16
+
+The later accepted yolobox ADR 0005 supersedes the exposure proposals below.
+This document remains the implementation plan; its older census wiring and
+example commands are historical design input, not deployed functionality.
+
+- Private sessions may read shared history without per-query approval. Older
+  and unclassified history is private, including names, paths, snippets, counts
+  and other metadata. Open-internet sessions may read only explicitly approved
+  immutable history snapshots; appending to a source file cannot release more
+  history under an old approval.
+- The sandbox service is a **separate authenticated read-only facade**, never
+  the census server. Authentication is mandatory even on loopback. It has no
+  annotations, stop, control, file-download, arbitrary command or proxy routes.
+  Census behavior and `PJ_CENSUS_CONTROL_TOKEN` remain independent.
+- Use an opaque short-lived bearer capability (`PJ_REMOTE_TOKEN`) and an
+  explicitly configured `PJ_REMOTE_URL`. The server fixes the visible corpus
+  from host-controlled configuration, never request flags. Bind loopback only;
+  yolobox uses its dedicated loopback alias. Unauthenticated loopback, shared
+  read/write tokens and blanket non-loopback exposure are rejected.
+- Project-juggler owns the client, read facade and corpus filtering. Yolobox
+  owns trusted session launch, credential delivery, private communication
+  enforcement, isolated writable state, installation and live qualification.
+  Skillmonger owns deployed agent guidance. A client URL is configuration,
+  not authorization to expose private history.
+- The initial remote surface is health, search, chats and chat. Other proposed
+  remote commands remain deferred. Local operation must remain available when
+  remote mode is absent; a configured remote failure must not silently fall
+  back to local data. The staged implementation contract is
+  [history-service-contract.md](../history-service-contract.md).
+
+Current launcher evidence: installed yolobox profile 2.2.2 has open egress and
+a shared writable HOME. There is no qualified private-agent launch path.
+Do not inject a private capability into that launcher. Unit tests or simulated
+HOME tests cannot satisfy deployment acceptance. Preserve transcripts and the
+existing uncommitted census work throughout installation.
+
+Completion requires the installed authorized sandbox boundary to search and
+read a known host-only conversation from another project, plus real negative
+checks for unauthorized contents and metadata, failure behavior, preserved
+local reads, isolated writes, history preservation and matching guidance.
+An offline private-reader probe is not evidence of a model-connected private
+agent. Keep that distinction explicit in issue status and rollout evidence.
+
+The older Tasks A/F (census exposure) are superseded for sandbox history by this
+separate facade. Tasks E/H/J remain the client dependency chain. Tasks I/K/G
+(show/next/ports) do not gate the initial history search/read slice. Task C/L
+guidance must describe only commands actually installed and qualified.
+
 ## Context
 
 `pj` should be useful from two places:
