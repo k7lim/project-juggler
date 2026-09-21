@@ -22,12 +22,17 @@ cd project-juggler
 # Run directly
 python3 -m pj list --pretty
 
-# Or install an editable command
-python3 -m pip install -e .
+# Or install a launcher that follows whichever python3 is on PATH
+mkdir -p ~/.local/bin
+ln -sf "$PWD/scripts/pj" ~/.local/bin/pj
+rehash 2>/dev/null || true
 pj list --pretty
 ```
 
-No runtime packages are required. Editable install only creates the `pj` command.
+No runtime packages are required. The launcher resolves this checkout through
+the symlink and runs `python3 -m pj`, so it does not embed an Xcode or Python
+installation path. Ensure `~/.local/bin` appears before Python's user script
+directory in `PATH`.
 
 ## Quick start
 
