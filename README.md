@@ -285,11 +285,15 @@ Read endpoints:
 | `GET /api/census?refresh=1` | `pj census` | array of normalized census rows | census summary fields such as `total`, `state_counts`, `category_counts`, `origin_counts`, `session_total`, `duration_hrs_total`, `generated_at` |
 | `GET /api/census?refresh=1&include_ports=1` | `pj census --include-ports` | array of normalized census rows with optional `ports` arrays | census summary fields plus optional `ports_included`, `ports_total`, `ports_sources`, and `warnings` |
 | `GET /api/next?limit=5` | `pj next --limit 5` | array of scored project recommendations | `total`, `limit`, `latency_ms` |
-| `GET /api/ports?project=name-or-id-or-path` | `pj ports [--project <query>]` | array of port records | `total`, optional `project`, `sources`, `warnings`, `latency_ms` |
 | `GET /api/search?q=term&q=other&limit=20&sort=newest&project=name&match=any&regex=0` | `pj search ...` | array of project search matches | `query`, `project`, `match`, `regex`, `sort`, `total`, `limit`, `latency_ms`, optional `hint` |
 | `GET /api/show?project=name-or-id&sessions=10` | `pj show <project>` | project object with `sessions` and `resume_cmd` | `latency_ms` |
 | `GET /api/chats?project=name-or-id&limit=20` | `pj chats <project>` | array of session summaries | `project`, `total`, `limit`, `latency_ms` |
 | `GET /api/chat/<session_id>?no_tools=1&roles=user,assistant&all_branches=0&last=10&offset=0&limit=5` | `pj chat <session_id>` | session object with paginated `messages` | `total_messages`, `offset`, `limit`, `latency_ms` |
+
+There is no separate `GET /api/ports` endpoint. Runtime port data is served
+only as census enrichment: request `GET /api/census?include_ports=1` and read
+each row's optional `ports` array (filter rows client-side by project). The
+standalone `pj ports` command remains local-only.
 
 Annotation endpoints append events through `pj.annotate`; they never rewrite
 annotation state directly:

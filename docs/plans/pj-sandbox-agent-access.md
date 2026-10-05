@@ -223,9 +223,8 @@ HITL decision tasks:
   policy before it is documented as normal.
 - Skill packaging: the plan needs a chosen location and distribution mechanism
   before an AFK agent can add a usable skill without guessing.
-- `/api/ports` contract: README documents `GET /api/ports`, while the current
-  server exposes port data through `GET /api/census?include_ports=1`; choose
-  implement-versus-defer before assigning the code/doc alignment task.
+- `/api/ports` contract: decided document-defer (see Task D decision); port
+  data is served only through `GET /api/census?include_ports=1`.
 
 This graph assumes remote mode is explicit through `PJ_REMOTE_URL`; automatic
 `host.docker.internal` probing is out of scope for the first implementation.
@@ -539,6 +538,47 @@ Out:
 
 - Blocked by: None - can start immediately.
 - Blocks: Task G.
+
+#### Decision (pj-55m.3)
+
+Selected direction: **document-defer**. Do not add `GET /api/ports` to the
+census server for the first remote-read contract; port data stays available only
+as census enrichment through `GET /api/census?include_ports=1`.
+
+Rationale: the web UI already consumes ports via `include_ports=1`, and runtime
+ports describe host listening sockets that a remote/sandbox reader cannot act on
+directly, so a second endpoint would add surface area without a consumer. A
+dedicated endpoint can be added later by wrapping `runtime_ports.ports()` if a
+remote `pj ports` client is actually needed.
+
+Alternatives considered:
+
+- Implement `GET /api/ports` now wrapping `runtime_ports.ports()` - rejected for
+  now: no remote consumer, extra surface on a server that may later be exposed
+  beyond loopback, and duplicates census enrichment.
+- Defer the separate endpoint and document `GET /api/census?include_ports=1` -
+  accepted.
+- Keep the README row without server support - rejected: the contract must not
+  advertise an endpoint that returns 404.
+
+Instructions for Task G (`pj-55m.7`):
+
+- Remove the `GET /api/ports?project=name-or-id-or-path` row from the README
+  read-endpoint table.
+- Directly after that table, add exactly:
+
+  > There is no separate `GET /api/ports` endpoint. Runtime port data is served
+  > only as census enrichment: request `GET /api/census?include_ports=1` and read
+  > each row's optional `ports` array (filter rows client-side by project). The
+  > standalone `pj ports` command remains local-only.
+
+- Server: no change; `/api/ports` keeps returning 404.
+- Test: `tests/test_census.py::test_readme_does_not_advertise_unrouted_api_ports`
+  asserts the README omits the row, mentions `include_ports=1`, and that the
+  server returns 404 for `/api/ports`.
+
+Note: the `overnight/pj-55m.3` branch already applies these README/test changes
+so Task G can verify and close rather than re-implement.
 
 #### Notes
 
