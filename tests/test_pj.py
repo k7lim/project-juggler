@@ -437,6 +437,39 @@ def test_fs_store_search_content_recency_uses_session_activity():
     assert results[0]["ended_at"] is not None
 
 
+def test_fs_store_sessions_by_project_reads_metadata_once():
+    """Grouping many projects must not re-read every session per project."""
+
+    class FakeParser:
+        agent_slug = "fake"
+
+        def __init__(self):
+            self.metadata_reads = 0
+
+        def list_sessions(self, root: str) -> list[str]:
+            return ["a1", "a2", "b1", "c1"]
+
+        def parse_metadata(self, path: str) -> NormalizedSession:
+            self.metadata_reads += 1
+            return NormalizedSession(
+                session_id=path,
+                agent=self.agent_slug,
+                source_path=path,
+                workspace=f"/tmp/{path[0]}",
+                started_at=int(path[1]) * 1000,
+            )
+
+    parser = FakeParser()
+    with mock.patch.object(fs_store, "_configured_roots", return_value=[("/tmp/root", parser)]):
+        grouped = fs_store.sessions_by_project(["/tmp/a", "/tmp/b", "/tmp/missing"])
+
+    assert parser.metadata_reads == 4
+    assert [s["session_id"] for s in grouped["/tmp/a"]] == ["a2", "a1"]
+    assert [s["session_id"] for s in grouped["/tmp/b"]] == ["b1"]
+    assert "/tmp/c" not in grouped
+    assert "/tmp/missing" not in grouped
+
+
 # --- pretty ---
 
 def test_pretty_no_projects(capsys):

@@ -197,38 +197,54 @@ def _activity_ms(session: base.NormalizedSession) -> int:
     return session.ended_at or session.started_at or 0
 
 
+def _session_summary(meta: base.NormalizedSession) -> dict:
+    duration_secs = None
+    if meta.started_at and meta.ended_at:
+        duration_secs = (meta.ended_at - meta.started_at) / 1000.0
+    return {
+        "session_id": meta.session_id,
+        "agent": meta.agent,
+        "title": meta.title,
+        "started_at": _iso_from_ms(meta.started_at) if meta.started_at else None,
+        "ended_at": _iso_from_ms(meta.ended_at) if meta.ended_at else None,
+        "model": meta.model,
+        "duration_secs": duration_secs,
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "cache_creation_tokens": None,
+        "total_tokens": None,
+        "user_messages": None,
+        "assistant_messages": None,
+        "tool_calls": None,
+        "api_calls": None,
+    }
+
+
+def _sort_summaries(results: list[dict]) -> list[dict]:
+    results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
+    return results
+
+
 def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
-    results = []
+    return sessions_by_project([workspace_path]).get(workspace_path, [])[:limit]
+
+
+def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
+    """Sessions for many workspaces in one pass over the session roots.
+
+    Calling project_sessions once per project re-reads every session's
+    metadata per project, which is quadratic across a whole-history search.
+    """
+    wanted = set(workspace_paths)
+    grouped: dict[str, list[dict]] = {}
     for root, parser in _configured_roots():
         for path in parser.list_sessions(root):
             meta = parser.parse_metadata(path)
-            if not meta or meta.workspace != workspace_path:
+            if not meta or meta.workspace not in wanted:
                 continue
-            duration_secs = None
-            if meta.started_at and meta.ended_at:
-                duration_secs = (meta.ended_at - meta.started_at) / 1000.0
-            iso = _iso_from_ms(meta.started_at) if meta.started_at else None
-            ended_iso = _iso_from_ms(meta.ended_at) if meta.ended_at else None
-            results.append({
-                "session_id": meta.session_id,
-                "agent": meta.agent,
-                "title": meta.title,
-                "started_at": iso,
-                "ended_at": ended_iso,
-                "model": meta.model,
-                "duration_secs": duration_secs,
-                "input_tokens": None,
-                "output_tokens": None,
-                "cache_read_tokens": None,
-                "cache_creation_tokens": None,
-                "total_tokens": None,
-                "user_messages": None,
-                "assistant_messages": None,
-                "tool_calls": None,
-                "api_calls": None,
-            })
-    results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "", reverse=True)
-    return results[:limit]
+            grouped.setdefault(meta.workspace, []).append(_session_summary(meta))
+    return {ws: _sort_summaries(results) for ws, results in grouped.items()}
 
 
 def session_details(session_ids: list) -> dict:

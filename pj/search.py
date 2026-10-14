@@ -219,8 +219,14 @@ def _scan_sessions(
     content_hits: list[dict] = []
     summaries: list[tuple[float, dict, dict]] = []
 
-    for project in projects:
-        for summary in get_store().project_sessions(project.get("path", ""), limit=9999):
+    store = get_store()
+    paths = [project.get("path", "") for project in projects]
+    if hasattr(store, "sessions_by_project"):
+        by_path = store.sessions_by_project(paths)
+    else:
+        by_path = {path: store.project_sessions(path, limit=9999) for path in paths}
+    for project, path in zip(projects, paths):
+        for summary in by_path.get(path, []):
             summaries.append((_parse_iso(summary.get("started_at")), project, summary))
 
     summaries.sort(key=lambda item: item[0], reverse=(sort != "oldest"))
