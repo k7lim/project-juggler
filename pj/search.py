@@ -233,7 +233,10 @@ def _scan_sessions(
 
     for _, project, summary in summaries:
         title = summary.get("title") or ""
-        full = get_store().get_session(str(summary.get("session_id", "")))
+        if summary.get("source_path") and hasattr(store, "load_session_file"):
+            full = store.load_session_file(summary["source_path"], summary.get("agent", ""))
+        else:
+            full = store.get_session(str(summary.get("session_id", "")))
         messages = full.get("messages", []) if full else []
         content_texts = [m.get("content", "") for m in messages]
         combined = " ".join([title, *content_texts])

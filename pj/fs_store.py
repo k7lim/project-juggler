@@ -227,7 +227,10 @@ def _sort_summaries(results: list[dict]) -> list[dict]:
 
 
 def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
-    return sessions_by_project([workspace_path]).get(workspace_path, [])[:limit]
+    sessions = sessions_by_project([workspace_path]).get(workspace_path, [])[:limit]
+    for summary in sessions:
+        summary.pop("source_path", None)
+    return sessions
 
 
 def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
@@ -235,6 +238,7 @@ def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
 
     Calling project_sessions once per project re-reads every session's
     metadata per project, which is quadratic across a whole-history search.
+    Summaries also carry "source_path" for load_session_file.
     """
     wanted = set(workspace_paths)
     grouped: dict[str, list[dict]] = {}
@@ -243,7 +247,8 @@ def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
             meta = parser.parse_metadata(path)
             if not meta or meta.workspace not in wanted:
                 continue
-            grouped.setdefault(meta.workspace, []).append(_session_summary(meta))
+            summary = {**_session_summary(meta), "source_path": meta.source_path}
+            grouped.setdefault(meta.workspace, []).append(summary)
     return {ws: _sort_summaries(results) for ws, results in grouped.items()}
 
 
@@ -378,15 +383,7 @@ def get_session(
                 continue
 
             # Parse with tree-walking for claude_code, plain parse for others
-            if parser.agent_slug == "claude_code":
-                session = parser.parse_session_tree(
-                    path,
-                    all_branches=all_branches,
-                    include_tools=include_tools,
-                    roles=roles,
-                )
-            else:
-                session = parser.parse_session(path)
+            session = _parse_full(parser, path, all_branches, include_tools, roles)
 
             if not session:
                 continue
@@ -410,20 +407,40 @@ def get_session(
             if not meta.session_id.startswith(session_id) and session_id not in meta.session_id:
                 continue
 
-            if parser.agent_slug == "claude_code":
-                session = parser.parse_session_tree(
-                    path,
-                    all_branches=all_branches,
-                    include_tools=include_tools,
-                    roles=roles,
-                )
-            else:
-                session = parser.parse_session(path)
+            session = _parse_full(parser, path, all_branches, include_tools, roles)
 
             if session:
                 return _session_to_dict(session)
 
     return None
+
+
+def _parse_full(parser, path, all_branches, include_tools, roles):
+    # Tree-walking for claude_code, plain parse for others
+    if parser.agent_slug == "claude_code":
+        return parser.parse_session_tree(
+            path,
+            all_branches=all_branches,
+            include_tools=include_tools,
+            roles=roles,
+        )
+    return parser.parse_session(path)
+
+
+def load_session_file(source_path: str, agent: str) -> dict | None:
+    """Load the session at a known path, skipping get_session's id lookup.
+
+    get_session walks every root per call, so calling it for each session
+    in a scan is quadratic; scans already know each session's file.
+    """
+    # Prefer the static registry: _configured_roots() globs every root.
+    parsers = [p for p in _PARSERS if p.agent_slug == agent]
+    if not parsers:
+        parsers = [p for _root, p in _configured_roots() if p.agent_slug == agent]
+    if not parsers:
+        return None
+    session = _parse_full(parsers[0], source_path, False, True, None)
+    return _session_to_dict(session) if session else None
 
 
 def _session_to_dict(session: base.NormalizedSession) -> dict:

@@ -468,6 +468,42 @@ def test_fs_store_sessions_by_project_reads_metadata_once():
     assert [s["session_id"] for s in grouped["/tmp/b"]] == ["b1"]
     assert "/tmp/c" not in grouped
     assert "/tmp/missing" not in grouped
+    assert grouped["/tmp/b"][0]["source_path"] == "b1"
+
+
+def test_search_scan_loads_sessions_by_path_not_id():
+    """A full scan must not do a per-session id lookup across all roots."""
+    from pj import search as search_mod
+    from pj.session_store import set_store, get_store
+
+    class FakeParser:
+        agent_slug = "fake"
+
+        def list_sessions(self, root: str) -> list[str]:
+            return ["s1", "s2"]
+
+        def _session(self, path: str) -> NormalizedSession:
+            return NormalizedSession(
+                session_id=path, agent=self.agent_slug, source_path=path,
+                workspace="/tmp/proj", title=path, started_at=1000,
+                messages=[NormalizedMessage(idx=0, role="user", content=f"{path} zebra")],
+            )
+
+        parse_metadata = _session
+        parse_session = _session
+
+    previous = get_store()
+    set_store(fs_store)  # type: ignore[arg-type]
+    try:
+        with mock.patch.object(fs_store, "_configured_roots", return_value=[("/tmp/root", FakeParser())]), \
+             mock.patch.object(fs_store, "get_session", side_effect=AssertionError("id lookup")):
+            hits, content = search_mod._scan_sessions(
+                [{"path": "/tmp/proj"}], ["zebra"], match="any", patterns=None,
+                limit=10, sort="relevance")
+    finally:
+        set_store(previous)
+
+    assert sorted(h["session_id"] for h in content) == ["s1", "s2"]
 
 
 # --- pretty ---
