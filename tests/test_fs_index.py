@@ -165,7 +165,6 @@ def test_deleted_session_disappears(corpus, fs_index):
     assert_same_as_fs(fs_index, "needle")
 
 
-@pending
 def test_missing_index_falls_back_to_fs_results(corpus, fs_index):
     from pj import paths
     assert not paths.index_path().exists()
@@ -204,7 +203,6 @@ def test_backend_env_selects_the_index(home, monkeypatch, fs_index):
     assert session_store.get_store() is fs_index
 
 
-@pending
 def test_index_implements_the_whole_session_store_protocol(fs_index):
     for name in ("available", "list_projects", "recent_session_counts", "project_sessions",
                  "session_details", "search_sessions", "search_content", "get_session",

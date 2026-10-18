@@ -26,3 +26,7 @@ def cache_dir() -> Path:
 
 def cache_file() -> Path:
     return cache_dir() / "project_index.json"
+
+
+def index_path() -> Path:
+    return data_dir() / "session_index.sqlite3"
