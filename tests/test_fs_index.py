@@ -14,6 +14,7 @@ load_session_file and candidate_sessions, which fs_index must implement too):
 import importlib
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -199,6 +200,28 @@ def test_index_is_used(corpus, fs_index, monkeypatch, sort):
     for query in QUERIES:
         assert fs_index.search_content(query, sort=sort) == expected[query], query
         assert fs_index.search_sessions(query, sort=sort) == expected_titles[query], query
+
+
+def _assert_index_is_used(fs_index, monkeypatch):
+    """Searches answer from the index alone: no session file is parsed."""
+    expected = fs_store.search_content("needle")
+    expected_titles = fs_store.search_sessions("alpha")
+    _forbid_parsing(monkeypatch)
+    assert fs_index.search_content("needle") == expected
+    assert fs_index.search_sessions("alpha") == expected_titles
+
+
+def test_wrong_schema_index_falls_back_until_refresh(corpus, fs_index, monkeypatch, capsys):
+    from pj import paths
+    monkeypatch.setattr(fs_index, "_warned", False)
+    fs_index.refresh()
+    with sqlite3.connect(str(paths.index_path())) as conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    conn.close()
+    assert_same_as_fs(fs_index, "needle")
+    assert capsys.readouterr().err.count("session index unavailable") == 1
+    fs_index.refresh()
+    _assert_index_is_used(fs_index, monkeypatch)
 
 
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):

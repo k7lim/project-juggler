@@ -243,11 +243,11 @@ class _TooStale(Exception):
 
 def _with_index(search, fallback):
     """search(conn) on the index; fallback() when the index cannot answer."""
-    index = paths.index_path()
-    if not index.exists():
-        return _fall_back(fallback, "no index file; run fs_index.refresh()")
+    conn = _open_current(paths.index_path())
+    if conn is None:
+        return _fall_back(fallback, "index missing, corrupt or outdated;"
+                                    " run fs_index.refresh()")
     try:
-        conn = sqlite3.connect(str(index))
         try:
             return search(conn)
         finally:
