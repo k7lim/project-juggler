@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -814,3 +815,120 @@ def test_message_text_is_read_only_for_files_the_search_reaches(corpus, fs_index
     assert set(read) <= set(reached)
     reads = [s for s in statements if "content FROM messages" in s]  # selects message text
     assert len(reads) == len(read) and all("rowid BETWEEN" in s for s in reads), reads
+
+
+# --- Metadata calls served from the index (pj-8qn.20) ---
+
+META_WS = ["/w/alpha", "/w/beta", "/w/gamma", "/w/missing", "(no workspace)"]
+X7 = ".codex/sessions/2026/09/07/rollout-x7.jsonl"
+M1 = ".claude/projects/-w-alpha/m1.jsonl"
+
+
+@pytest.fixture
+def meta_corpus(corpus):
+    """corpus plus sessions with a model (both agents) and a kimi directory session."""
+    _write(sessions_home(corpus) / X7, [
+        {"type": "session_meta", "timestamp": "2026-09-07T00:00:00Z",
+         "payload": {"id": "x7", "cwd": "/w/gamma"}},
+        {"type": "turn_context", "timestamp": "2026-09-07T00:00:01Z",
+         "payload": {"cwd": "/w/gamma", "model": "gpt-test-1"}},
+        {"type": "response_item", "timestamp": "2026-09-07T00:00:02Z",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "model test"}]}}])
+    _write(sessions_home(corpus) / M1, [
+        {"type": "user", "sessionId": "m1", "cwd": "/w/alpha", "uuid": "m1-0", "parentUuid": None,
+         "timestamp": "2026-09-08T00:00:00Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "which model"}]}},
+        {"type": "assistant", "sessionId": "m1", "cwd": "/w/alpha", "uuid": "m1-1",
+         "parentUuid": "m1-0", "timestamp": "2026-09-08T00:10:00Z",
+         "message": {"role": "assistant", "model": "claude-test-1",
+                     "content": [{"type": "text", "text": "this one"}]}}])
+    kimi_session(corpus, "k1", ["kimi needle"])
+    return corpus
+
+
+def _metadata_results(store):
+    # Sessions start on 2026-09-01..08: this window keeps days 5 onwards.
+    split = (datetime.now(timezone.utc) - datetime(2026, 9, 4, tzinfo=timezone.utc)).days
+    return {
+        "list_projects": store.list_projects(),
+        "list_projects_detail": store.list_projects(detail=True),
+        "recent_all": store.recent_session_counts(days=100000),
+        "recent_split": store.recent_session_counts(days=split),
+        "sessions_by_project": store.sessions_by_project(META_WS),
+        "project_sessions": store.project_sessions("/w/alpha"),
+        "project_sessions_limit": store.project_sessions("/w/gamma", limit=1),
+    }
+
+
+def test_meta_fixture_exercises_fs_store_metadata(meta_corpus):
+    """Characterize the oracle, so the metadata parity tests are not vacuous."""
+    r = _metadata_results(fs_store)
+    models = {p["path"]: p["models"] for p in r["list_projects_detail"]}
+    assert models["/w/gamma"] == ["gpt-test-1"] and models["/w/alpha"] == ["claude-test-1"]
+    assert "(no workspace)" in models                                  # kimi
+    assert any(p["total_duration_secs"] for p in r["list_projects_detail"])
+    assert r["recent_split"] and r["recent_split"] != r["recent_all"]
+    assert [s["session_id"] for s in r["project_sessions"]] == ["m1", "c2", "c1"]
+    assert r["project_sessions"][0]["model"] == "claude-test-1"
+    assert [s["session_id"] for s in r["project_sessions_limit"]] == ["x7"]
+    assert "/w/missing" not in r["sessions_by_project"]
+    assert r["sessions_by_project"]["/w/alpha"][0]["source_path"] == _path(meta_corpus, M1)
+
+
+def test_metadata_calls_match_fs_store_exactly(meta_corpus, fs_index):
+    fs_index.refresh()
+    assert _metadata_results(fs_index) == _metadata_results(fs_store)
+
+
+def test_metadata_calls_match_fs_store_with_new_and_deleted_files(meta_corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    new = str(claude_session(meta_corpus, "alpha", "c9", 9, [("user", "new session")]))
+    (sessions_home(meta_corpus) / C1).unlink()
+    expected = _metadata_results(fs_store)
+    assert [s["session_id"] for s in expected["project_sessions"]] == ["c9", "m1", "c2"]
+    parsed = []
+    real = claude_code.parse_metadata
+    monkeypatch.setattr(claude_code, "parse_metadata",
+                        lambda path: parsed.append(path) or real(path))
+    assert _metadata_results(fs_index) == expected
+    assert set(parsed) == {new}  # only the dirty file is parsed
+
+
+def test_metadata_calls_use_the_index(meta_corpus, fs_index, monkeypatch):
+    """After refresh() no file is dirty, so the metadata calls must not parse at all."""
+    expected = _metadata_results(fs_store)
+    fs_index.refresh()
+    _forbid_parsing(monkeypatch)
+    assert _metadata_results(fs_index) == expected
+
+
+@pytest.mark.parametrize("unusable", ["missing", "too_stale"])
+def test_metadata_calls_fall_back_to_fs_store(meta_corpus, fs_index, monkeypatch, capsys, unusable):
+    monkeypatch.setattr(fs_index, "_warned", False)
+    if unusable == "too_stale":
+        fs_index.refresh()
+        monkeypatch.setattr(fs_index, "MAX_DIRTY_FILES", 0)
+        claude_session(meta_corpus, "delta", "c9", 9, [("user", "new session")])
+    assert _metadata_results(fs_index) == _metadata_results(fs_store)
+    assert "pj index refresh" in capsys.readouterr().err
+
+
+def test_scoped_search_parses_no_clean_file(meta_corpus, fs_index, monkeypatch):
+    """discover's list_projects and sessions_by_project answer from the index;
+    only the one candidate session is loaded."""
+    from pj import paths
+    expected = _search_with(fs_store, monkeypatch, "needle", project="alpha")
+    assert expected
+    fs_index.refresh()
+    paths.cache_file().unlink()  # discover must call list_projects, not read its cache
+    parsed = []
+
+    def recording(real):
+        return lambda path, *args, **kwargs: parsed.append(path) or real(path, *args, **kwargs)
+    for parser in (claude_code, codex, kimi):
+        monkeypatch.setattr(parser, "parse_metadata", lambda *a, **k: pytest.fail("parse_metadata"))
+        monkeypatch.setattr(parser, "parse_session", recording(parser.parse_session))
+    monkeypatch.setattr(claude_code, "parse_session_tree", recording(claude_code.parse_session_tree))
+    assert _search_with(fs_index, monkeypatch, "needle", project="alpha") == expected
+    assert set(parsed) == {_path(meta_corpus, C1)}  # the candidate's load_session_file

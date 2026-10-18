@@ -4,10 +4,11 @@ Implements the SessionStore protocol (session_store.py). It must give the
 same results as fs_store, and fs_store results whenever the index cannot
 answer. See docs/plans/fs-index.md.
 
-refresh() builds the index file. search_content and search_sessions answer
-unchanged files from it and parse only the dirty set (new or changed
-files); candidate_sessions narrows search's scan path from it. The other
-calls still delegate to fs_store.
+refresh() builds the index file. search_content, search_sessions and the
+metadata calls (list_projects, recent_session_counts, sessions_by_project,
+project_sessions) answer unchanged files from it and parse only the dirty
+set (new or changed files); candidate_sessions narrows search's scan path
+from it. The other calls still delegate to fs_store.
 """
 from __future__ import annotations
 
@@ -509,11 +510,18 @@ def _parse_and_keep(dirty: _Dirty, meta, parsed: dict):
 
 def _search_sessions(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
     """Titles come from files.title; fs_store's own loop decides the matches."""
+    return fs_store.search_titles(_metadata(conn), query, limit=limit, sort=sort)
+
+
+def _metadata(conn: sqlite3.Connection) -> list:
+    """parse_metadata results in list_sessions order: stored for clean files, parsed for dirty.
+
+    Dirty files are not written back: writing needs parse_session too.
+    """
     listed = _listed(_indexed_rows(conn))
     _check_dirty_bound(listed)
-    metas = (parser.parse_metadata(path) if row is None else _stored_metadata(row)
-             for path, parser, row, _ in listed)
-    return fs_store.search_titles(metas, query, limit=limit, sort=sort)
+    return [parser.parse_metadata(path) if row is None else _stored_metadata(row)
+            for path, parser, row, _ in listed]
 
 
 # --- Write-back: an optimization only; correctness never depends on it ---
@@ -695,19 +703,27 @@ def available() -> bool:
 
 
 def list_projects(detail: bool = False) -> list[dict]:
-    return fs_store.list_projects(detail=detail)
+    return _with_index(
+        lambda conn: fs_store.group_projects(_metadata(conn), detail=detail),
+        lambda: fs_store.list_projects(detail=detail))
 
 
 def recent_session_counts(days: int = 7) -> dict[str, int]:
-    return fs_store.recent_session_counts(days=days)
+    return _with_index(
+        lambda conn: fs_store.count_recent(_metadata(conn), days=days),
+        lambda: fs_store.recent_session_counts(days=days))
 
 
 def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
-    return fs_store.project_sessions(workspace_path, limit=limit)
+    return _with_index(
+        lambda conn: fs_store.project_summaries(_metadata(conn), workspace_path, limit=limit),
+        lambda: fs_store.project_sessions(workspace_path, limit=limit))
 
 
 def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
-    return fs_store.sessions_by_project(workspace_paths)
+    return _with_index(
+        lambda conn: fs_store.summaries_by_project(_metadata(conn), workspace_paths),
+        lambda: fs_store.sessions_by_project(workspace_paths))
 
 
 def session_details(session_ids: list) -> dict:
