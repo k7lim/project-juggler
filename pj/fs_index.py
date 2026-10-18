@@ -51,7 +51,7 @@ def refresh() -> dict:
     try:
         _prepare_data_dir()
         with _write_lock(paths.index_path().with_suffix(".lock")):
-            counts = _full_build(paths.index_path())
+            counts = _refresh_locked(paths.index_path())
     finally:
         os.umask(old_umask)
     counts["seconds"] = round(time.monotonic() - start, 3)
@@ -83,6 +83,32 @@ def _write_lock(lock_path: Path):
         yield
     finally:
         os.close(fd)  # closing releases the lock
+
+
+def _refresh_locked(index: Path) -> dict:
+    conn = _open_current(index)
+    if conn is None:
+        return _full_build(index)
+    try:
+        with conn:
+            return _sync(conn)
+    finally:
+        conn.close()
+
+
+def _open_current(index: Path) -> sqlite3.Connection | None:
+    """Open the index for update, or None when it is missing, corrupt or outdated."""
+    if not index.exists():
+        return None
+    conn = sqlite3.connect(str(index))
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.DatabaseError:
+        row = None
+    if row != (SCHEMA_VERSION,):
+        conn.close()
+        return None
+    return conn
 
 
 def _full_build(index: Path) -> dict:
@@ -127,15 +153,38 @@ def _scan():
 
 
 def _sync(conn: sqlite3.Connection) -> dict:
-    added = 0
+    """Reparse files whose (size, mtime_ns) changed; drop files that are gone."""
+    indexed = {path: (file_id, sig, pos) for path, file_id, *sig, pos in conn.execute(
+        "SELECT path, id, size, mtime_ns, list_pos FROM files")}
+    changed, moved, present = [], [], set()
     for path, parser, pos in _scan():
         try:
             st = os.stat(path)
         except OSError:
             continue
+        present.add(path)
+        old = indexed.get(path)
+        if old is None or old[1] != [st.st_size, st.st_mtime_ns]:
+            changed.append((path, parser, pos, st))
+        elif old[2] != pos:
+            moved.append((pos, old[0]))
+    stale = [indexed[p][0] for p in indexed if p not in present]
+    replaced = [indexed[c[0]][0] for c in changed if c[0] in indexed]
+    _delete_files(conn, stale + replaced)
+    conn.executemany("UPDATE files SET list_pos = ? WHERE id = ?", moved)
+    for path, parser, pos, st in changed:
         _index_file(conn, path, parser, pos, st)
-        added += 1
-    return {"added": added, "updated": 0, "removed": 0, "rebuilt": False}
+    return {"added": len(changed) - len(replaced), "updated": len(replaced),
+            "removed": len(stale), "rebuilt": False}
+
+
+def _delete_files(conn: sqlite3.Connection, file_ids: list[int]) -> None:
+    """One pass over messages (file_id is UNINDEXED, so each delete scans)."""
+    if not file_ids:
+        return
+    marks = ",".join("?" * len(file_ids))
+    conn.execute(f"DELETE FROM messages WHERE file_id IN ({marks})", file_ids)
+    conn.execute(f"DELETE FROM files WHERE id IN ({marks})", file_ids)
 
 
 def _index_file(conn: sqlite3.Connection, path: str, parser, pos: int,
