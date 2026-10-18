@@ -461,3 +461,39 @@ A warm scoped search takes 1.2 s:
 - 0.17 s: the per-word title check loops in Python over every row.
 - First-run cost: dirty files are parsed on the metadata path and never
   written back.
+
+## Iteration 3 (approved 2026-10-18)
+
+Target: a warm scoped CLI search under 1 s p95, with content search kept at
+its iteration-2 numbers. Revisit condition: if the rerun still fails,
+present keep (relaxed scoped budget) or delete.
+
+Evidence gathered before planning (read-only, real history, 150 random
+Claude files): the stored `parse_session` text covered every message of
+`parse_session_tree(all_branches=False, include_tools=True)` by substring,
+so pj-8qn.10's narrowing stays a superset. The two were identical in only
+64/150 files, so the stored rows cannot stand in for Claude's
+`load_session_file`.
+
+1. **Benchmark parity at the limit boundary.** fs and index run about 30 s
+   apart. A session that starts matching in between can push one older
+   session out of the top `limit`. Compare the two stable lists after
+   dropping as many tail entries as there were unstable sessions in either
+   list.
+2. **One syscall per path.** `_stat` calls `os.stat(path)` once. Only when
+   that is a directory does it aggregate `_signature_paths`.
+3. **Narrowing by rowid.** `_word_candidates` maps matching rowids to files
+   with the rowid ranges (bisect), as content search does since pj-8qn.19,
+   instead of `SELECT DISTINCT file_id` (which reads full records).
+4. **`load_session_file` from the index.** For a clean file it returns the
+   stored session:
+   - codex and kimi: `fs_store._parse_full` is `parse_session`, which is
+     exactly what is stored;
+   - claude_code: `parse_session_tree(all_branches=False,
+     include_tools=True)`, kept in a new plain table
+     `tree_messages(file_rowid..., ord, role, content)` with its own rowid
+     range per file (schema v3), built in refresh, write-back and verify.
+   - A dirty or unknown file delegates to fs_store as today.
+
+   Stop condition: if the v3 build on the host exceeds 150 s or the index
+   grows more than 50%, stop and report. Do not ship.
