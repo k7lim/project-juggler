@@ -73,6 +73,8 @@ def claude_session(home, project, session_id, day, texts, *, tool=False):
         if tool and role == "assistant":
             content.append({"type": "tool_use", "name": "Bash", "input": {}})
         events.append({"type": role, "sessionId": session_id, "cwd": f"/w/{project}",
+                       "uuid": f"{session_id}-{i}",  # chained, as in real logs
+                       "parentUuid": f"{session_id}-{i - 1}" if i else None,
                        "timestamp": f"2026-09-{day:02d}T00:00:{i:02d}Z",
                        "message": {"role": role, "content": content}})
     return _write(sessions_home(home) / f".claude/projects/-w-{project}/{session_id}.jsonl", events)
@@ -113,6 +115,8 @@ def test_fixture_exercises_fs_store_behaviour(corpus):
     assert "x1" in ids("go")
     assert ids("needle", sort="relevance")[0] == "c1"         # 3 occurrences beat 1
     assert ids("alpha", limit=2) == ["x3", "c3"]
+    c1 = str(sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl")
+    assert len(fs_store.load_session_file(c1, "claude_code")["messages"]) == 2  # the scan path sees Claude messages
 
 
 def assert_same_as_fs(fs_index, query, *, limit=20, sort="newest"):
