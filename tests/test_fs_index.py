@@ -2,8 +2,7 @@
 
 The index is only worth its complexity if it is a drop-in for fs_store's
 content search: same results, same freshness, and a safe fallback.  These
-tests are that contract.  They are strict-xfail until pj/fs_index.py exists;
-remove the mark when they pass.
+tests are that contract.
 
 Assumed interface (SessionStore gains sessions_by_project,
 load_session_file and candidate_sessions, which fs_index must implement too):
@@ -22,9 +21,6 @@ import pytest
 
 from pj import fs_store, session_store
 from pj.parsers import claude_code, codex, kimi
-
-pending = pytest.mark.xfail(
-    strict=True, reason="pj-nd2: session index not implemented yet")
 
 QUERIES = [
     "needle",          # several sessions, several workspaces
@@ -123,7 +119,6 @@ def assert_same_as_fs(fs_index, query, *, limit=20, sort="newest"):
     assert fs_index.search_content(query, limit=limit, sort=sort) == expected, query
 
 
-@pending
 @pytest.mark.parametrize("sort", ["newest", "oldest", "relevance"])
 @pytest.mark.parametrize("query", QUERIES)
 def test_search_content_matches_fs_store_exactly(corpus, fs_index, query, sort):
@@ -131,7 +126,6 @@ def test_search_content_matches_fs_store_exactly(corpus, fs_index, query, sort):
     assert_same_as_fs(fs_index, query, sort=sort)
 
 
-@pending
 @pytest.mark.parametrize("limit", [1, 2, 3, 100])
 def test_limit_cuts_at_the_same_session_as_fs_store(corpus, fs_index, limit):
     fs_index.refresh()
@@ -139,14 +133,12 @@ def test_limit_cuts_at_the_same_session_as_fs_store(corpus, fs_index, limit):
     assert_same_as_fs(fs_index, "alpha", limit=limit)
 
 
-@pending
 def test_new_session_is_found_without_an_explicit_refresh(corpus, fs_index):
     fs_index.refresh()
     claude_session(corpus, "delta", "c9", 9, [("user", "fresh-needle-xyz")])
     assert [h["session_id"] for h in fs_index.search_content("fresh-needle-xyz")] == ["c9"]
 
 
-@pending
 def test_appended_message_is_found_without_an_explicit_refresh(corpus, fs_index):
     fs_index.refresh()
     path = sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl"
@@ -158,7 +150,6 @@ def test_appended_message_is_found_without_an_explicit_refresh(corpus, fs_index)
     assert fs_index.search_content("appended-term-qq")
 
 
-@pending
 def test_deleted_session_disappears(corpus, fs_index):
     fs_index.refresh()
     (sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl").unlink()
@@ -171,7 +162,6 @@ def test_missing_index_falls_back_to_fs_results(corpus, fs_index):
     assert_same_as_fs(fs_index, "needle")
 
 
-@pending
 def test_corrupt_index_falls_back_to_fs_results(corpus, fs_index):
     from pj import paths
     fs_index.refresh()
@@ -179,7 +169,6 @@ def test_corrupt_index_falls_back_to_fs_results(corpus, fs_index):
     assert_same_as_fs(fs_index, "needle")
 
 
-@pending
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
     from pj import paths
     fs_index.refresh()
@@ -188,7 +177,6 @@ def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
-@pending
 def test_refresh_is_idempotent(corpus, fs_index):
     fs_index.refresh()
     first = fs_index.search_content("needle", sort="relevance")
