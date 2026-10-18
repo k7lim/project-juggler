@@ -196,7 +196,6 @@ def test_refresh_is_idempotent(corpus, fs_index):
     assert fs_index.search_content("needle", sort="relevance") == first
 
 
-@pending
 def test_backend_env_selects_the_index(home, monkeypatch, fs_index):
     monkeypatch.setenv("PJ_BACKEND", "index")
     monkeypatch.setattr(session_store, "_store", None)

@@ -143,14 +143,20 @@ _store: SessionStore | None = None
 def get_store() -> SessionStore:
     """Return the active session store. Defaults to fs_store.
 
-    Set PJ_BACKEND=cass to use the CASS backend instead.
+    Set PJ_BACKEND=cass to use the CASS backend instead, or
+    PJ_BACKEND=index for the opt-in session index (fs_index), which gives
+    fs_store results whenever the index cannot answer.
     """
     global _store
     if _store is None:
         import os
-        if os.environ.get("PJ_BACKEND") == "cass":
+        backend = os.environ.get("PJ_BACKEND")
+        if backend == "cass":
             from . import cass_facade
             _store = cass_facade  # type: ignore[assignment]
+        elif backend == "index":
+            from . import fs_index
+            _store = fs_index  # type: ignore[assignment]
         else:
             from . import fs_store
             _store = fs_store  # type: ignore[assignment]
