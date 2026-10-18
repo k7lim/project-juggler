@@ -180,8 +180,13 @@ def _full_build(index: Path) -> dict:
                 ("built_at", datetime.now(timezone.utc).isoformat()),
             ])
             counts = _sync(conn)
+        # WAL mode persists in the db header, so the replaced index opens in WAL.
+        # TRUNCATE moves every page into <index>.tmp before close; the sidecars
+        # (kept by builds with persistent WAL, e.g. macOS) then hold nothing.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
+    _remove_db_files(tmp, keep_main=True)
     _remove_db_files(index, keep_main=True)  # a stale -wal must not pair with the new file
     os.replace(tmp, index)
     counts["rebuilt"] = True

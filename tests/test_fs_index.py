@@ -279,6 +279,30 @@ def test_refresh_rebuilds_a_corrupt_index(corpus, fs_index, monkeypatch):
     _assert_index_is_used(fs_index, monkeypatch)
 
 
+def _assert_clean_wal_index(fs_index, monkeypatch):
+    from pj import paths
+    assert list(paths.data_dir().glob("*.tmp*")) == []
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        conn.close()
+    _assert_index_is_used(fs_index, monkeypatch)
+
+
+def test_full_build_leaves_no_tmp_files(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    _assert_clean_wal_index(fs_index, monkeypatch)
+
+
+def test_rebuild_of_corrupt_index_leaves_no_tmp_files(corpus, fs_index, monkeypatch):
+    from pj import paths
+    fs_index.refresh()
+    paths.index_path().write_bytes(b"not a database")
+    fs_index.refresh()
+    _assert_clean_wal_index(fs_index, monkeypatch)
+
+
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
     from pj import paths
     fs_index.refresh()
