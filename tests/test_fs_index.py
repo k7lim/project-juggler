@@ -382,3 +382,49 @@ def test_too_many_dirty_files_gives_fs_store_results(corpus, fs_index, monkeypat
     assert fs_index.search_sessions("needle") == fs_store.search_sessions("needle")
     assert "pj index refresh" in capsys.readouterr().err
     assert not new & _indexed_paths()  # fs_store answered; nothing was written back
+
+
+# --- Divergence check: refresh(verify=True) (pj-8qn.9) ---
+
+def _tamper(sql, path):
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        with conn:
+            conn.execute(sql, (path,))
+    finally:
+        conn.close()
+
+
+def test_verify_reports_and_repairs_a_tampered_message(corpus, fs_index):
+    fs_index.refresh()
+    path = str(sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl")
+    _tamper("UPDATE messages SET content = 'tampered' WHERE ord = 0 AND file_id ="
+            " (SELECT id FROM files WHERE path = ?)", path)
+    first = fs_index.refresh(verify=True)
+    assert (first["checked"], first["mismatched"], first["repaired"]) == (6, [path], 1)
+    assert_same_as_fs(fs_index, "needle")
+    second = fs_index.refresh(verify=True)
+    assert (second["checked"], second["mismatched"], second["repaired"]) == (6, [], 0)
+
+
+def test_verify_checks_at_most_the_sample_size(corpus, fs_index):
+    import random
+    fs_index.refresh()
+    result = fs_index.refresh(verify=True, sample_size=2, rng=random.Random(0))
+    assert (result["checked"], result["mismatched"], result["repaired"]) == (2, [], 0)
+
+
+def test_verify_works_right_after_a_full_build(corpus, fs_index):
+    result = fs_index.refresh(verify=True)
+    assert result["rebuilt"] is True
+    assert (result["checked"], result["mismatched"], result["repaired"]) == (6, [], 0)
+
+
+def test_plain_refresh_does_not_sample(corpus, fs_index, monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("plain refresh() must not verify")
+    monkeypatch.setattr(fs_index, "_verify", forbidden)
+    fs_index.refresh()
+    result = fs_index.refresh()
+    assert "checked" not in result

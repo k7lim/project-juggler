@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import os
+import random
 import sqlite3
 import sys
 import time
@@ -49,8 +50,16 @@ def cache_signatures() -> dict[str, float]:
 
 # --- Index build ---
 
-def refresh() -> dict:
-    """Bring the index file at paths.index_path() up to date with the session files."""
+VERIFY_SAMPLE = 50
+
+
+def refresh(verify: bool = False, sample_size: int = VERIFY_SAMPLE,
+            rng: random.Random | None = None) -> dict:
+    """Bring the index file at paths.index_path() up to date with the session files.
+
+    verify=True also runs the divergence check (see _verify) on up to
+    sample_size indexed files, under the same write lock.
+    """
     start = time.monotonic()
     _require_fts5()
     old_umask = os.umask(0o077)  # process-global: always restore
@@ -58,6 +67,9 @@ def refresh() -> dict:
         _prepare_data_dir()
         with _write_lock(paths.index_path().with_suffix(".lock")):
             counts = _refresh_locked(paths.index_path())
+            if verify:
+                counts.update(_verify_locked(paths.index_path(), sample_size,
+                                             rng or random.Random()))
     finally:
         os.umask(old_umask)
     counts["seconds"] = round(time.monotonic() - start, 3)
@@ -223,6 +235,64 @@ def _session_fields(session) -> tuple:
         return (None,) * 5
     return (session.session_id, session.workspace, session.title,
             session.started_at, session.ended_at)
+
+
+# --- Divergence check ---
+# Size plus mtime misses a file rewritten with the same size and mtime, so
+# refresh(verify=True) compares a random sample with a fresh parse.
+# "Mismatch" means the stored messages (content, role, order) differ.
+
+def _verify_locked(index: Path, sample_size: int, rng: random.Random) -> dict:
+    conn = _open_current(index)  # refresh just made it current
+    if conn is None:
+        return {"checked": 0, "mismatched": [], "repaired": 0}
+    try:
+        with conn:
+            return _verify(conn, sample_size, rng)
+    finally:
+        conn.close()
+
+
+def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> dict:
+    """Re-index every sampled file whose stored copy differs from a fresh parse."""
+    parsers = {parser.agent_slug: parser for _, parser in fs_store._configured_roots()}
+    rows = [r for r in conn.execute("SELECT id, path, agent, list_pos FROM files ORDER BY id")
+            if r[2] in parsers]
+    sample = rng.sample(rows, min(sample_size, len(rows)))
+    stored = _stored_messages(conn, [r[0] for r in sample])
+    checked, bad = 0, []
+    for file_id, path, agent, pos in sample:
+        st = _stat(path)  # taken before parsing, as _insert_file requires
+        if st is None:
+            continue  # gone since the sync; the next refresh drops it
+        checked += 1
+        parser = parsers[agent]
+        meta, session = parser.parse_metadata(path), parser.parse_session(path)
+        if stored.get(file_id, []) != _fresh_messages(session):
+            bad.append((file_id, path, parser, pos, st, meta, session))
+    _delete_files(conn, [b[0] for b in bad])
+    for _, path, parser, pos, st, meta, session in bad:
+        _insert_file(conn, path, parser, pos, st, meta, session)
+    return {"checked": checked, "mismatched": sorted(b[1] for b in bad), "repaired": len(bad)}
+
+
+def _stored_messages(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
+    """{file_id: [(content, role, ord)] in order}, in one pass over messages."""
+    if not file_ids:
+        return {}
+    marks = ",".join("?" * len(file_ids))
+    stored: dict = {}
+    for file_id, content, role, ord_ in conn.execute(
+            f"SELECT file_id, content, role, ord FROM messages WHERE file_id IN ({marks})"
+            " ORDER BY file_id, ord", file_ids):
+        stored.setdefault(file_id, []).append((content, role, ord_))
+    return stored
+
+
+def _fresh_messages(session) -> list:
+    if not session:
+        return []
+    return [(m.content, m.role, i) for i, m in enumerate(session.messages)]
 
 
 # --- Index search ---
