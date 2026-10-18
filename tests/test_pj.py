@@ -471,6 +471,22 @@ def test_fs_store_sessions_by_project_reads_metadata_once():
     assert grouped["/tmp/b"][0]["source_path"] == "b1"
 
 
+def test_cass_facade_sessions_by_project_loops_project_sessions():
+    """cass_facade groups sessions with one project_sessions call per path."""
+    rows = {"/tmp/a": [{"session_id": 1}], "/tmp/b": []}
+    calls = []
+
+    def fake_project_sessions(path, limit=50):
+        calls.append((path, limit))
+        return rows.get(path, [])
+
+    with mock.patch.object(cass_facade, "project_sessions", side_effect=fake_project_sessions):
+        grouped = cass_facade.sessions_by_project(["/tmp/a", "/tmp/b"])
+
+    assert grouped == {"/tmp/a": [{"session_id": 1}], "/tmp/b": []}
+    assert calls == [("/tmp/a", 9999), ("/tmp/b", 9999)]
+
+
 def test_search_scan_loads_sessions_by_path_not_id():
     """A full scan must not do a per-session id lookup across all roots."""
     from pj import search as search_mod
@@ -2533,6 +2549,9 @@ class FakeStore:
 
     def project_sessions(self, workspace_path: str, limit: int = 50) -> list[dict]:
         return [s for s in self._sessions if s.get("_path") == workspace_path][:limit]
+
+    def sessions_by_project(self, workspace_paths: list[str]) -> dict[str, list[dict]]:
+        return {path: self.project_sessions(path, limit=9999) for path in workspace_paths}
 
     def session_details(self, session_ids: list) -> dict:
         return {}

@@ -221,10 +221,7 @@ def _scan_sessions(
 
     store = get_store()
     paths = [project.get("path", "") for project in projects]
-    if hasattr(store, "sessions_by_project"):
-        by_path = store.sessions_by_project(paths)
-    else:
-        by_path = {path: store.project_sessions(path, limit=9999) for path in paths}
+    by_path = store.sessions_by_project(paths)
     for project, path in zip(projects, paths):
         for summary in by_path.get(path, []):
             summaries.append((_parse_iso(summary.get("started_at")), project, summary))

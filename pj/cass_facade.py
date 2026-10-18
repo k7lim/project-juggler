@@ -425,6 +425,11 @@ def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[di
     return deduped[:limit]
 
 
+def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
+    """Sessions for many workspaces: one project_sessions query per path."""
+    return {path: project_sessions(path, limit=9999) for path in workspace_paths}
+
+
 def get_session(
     session_id: str,
     *,

@@ -59,6 +59,15 @@ class SessionStore(Protocol):
         """
         ...
 
+    def sessions_by_project(self, workspace_paths: list[str]) -> dict[str, list[dict]]:
+        """Sessions for many workspaces at once, each list most recent first.
+
+        Returns {workspace_path: [summary, ...]} with the project_sessions
+        summary shape. Workspaces with no sessions may be absent. A summary
+        may also carry "source_path" for load_session_file.
+        """
+        ...
+
     def session_details(self, session_ids: list) -> dict:
         """Per-session metadata (versions, models).
 
