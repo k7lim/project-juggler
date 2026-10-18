@@ -163,6 +163,47 @@ def test_appended_message_is_found_without_an_explicit_refresh(corpus, fs_index)
     assert fs_index.search_content("appended-term-qq")
 
 
+def _kimi_turn(text, ts):
+    return {"timestamp": ts, "message": {"type": "TurnBegin",
+                                         "payload": {"user_input": [{"type": "text", "text": text}]}}}
+
+
+def kimi_session(home, session_id, texts):
+    """A kimi session is a directory; list_sessions yields the directory."""
+    session_dir = home / ".kimi-test/sessions/wshash" / session_id
+    _write(session_dir / "state.json", [{"custom_title": session_id}])
+    _write(session_dir / "wire.jsonl", [_kimi_turn(t, 1788000000 + i) for i, t in enumerate(texts)])
+    return session_dir
+
+
+def _append_to_kimi_keeping_dir_stat(session_dir, text):
+    """Grow wire.jsonl; restore the directory's mtime so only the file changes."""
+    dir_st = os.stat(session_dir)
+    with (session_dir / "wire.jsonl").open("a") as f:
+        f.write(json.dumps(_kimi_turn(text, 1788000100)) + "\n")
+    os.utime(session_dir, ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    assert os.stat(session_dir).st_mtime_ns == dir_st.st_mtime_ns
+
+
+def test_appended_kimi_message_is_found_without_an_explicit_refresh(corpus, fs_index):
+    session_dir = kimi_session(corpus, "k1", ["kimi needle"])
+    fs_index.refresh()
+    _append_to_kimi_keeping_dir_stat(session_dir, "kimi-appended-zz")
+    assert_same_as_fs(fs_index, "kimi-appended-zz")
+    assert fs_index.search_content("kimi-appended-zz")
+
+
+def test_refresh_updates_an_appended_kimi_session(corpus, fs_index, monkeypatch):
+    session_dir = kimi_session(corpus, "k1", ["kimi needle"])
+    fs_index.refresh()
+    _append_to_kimi_keeping_dir_stat(session_dir, "kimi-appended-zz")
+    assert fs_index.refresh()["updated"] == 1
+    expected = fs_store.search_content("kimi-appended-zz")
+    assert expected
+    _forbid_parsing(monkeypatch)  # the unchanged kimi session is answered from the index
+    assert fs_index.search_content("kimi-appended-zz") == expected
+
+
 def test_deleted_session_disappears(corpus, fs_index):
     fs_index.refresh()
     (sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl").unlink()

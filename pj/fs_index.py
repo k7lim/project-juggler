@@ -213,13 +213,12 @@ def _sync(conn: sqlite3.Connection) -> dict:
         "SELECT path, id, size, mtime_ns, list_pos FROM files")}
     changed, moved, present = [], [], set()
     for path, parser, pos in _scan():
-        try:
-            st = os.stat(path)
-        except OSError:
+        st = _stat(path)
+        if st is None:
             continue
         present.add(path)
         old = indexed.get(path)
-        if old is None or old[1] != [st.st_size, st.st_mtime_ns]:
+        if old is None or old[1] != [st.size, st.mtime_ns]:
             changed.append((path, parser, pos, st))
         elif old[2] != pos:
             moved.append((pos, old[0]))
@@ -243,20 +242,20 @@ def _delete_files(conn: sqlite3.Connection, file_ids: list[int]) -> None:
 
 
 def _index_file(conn: sqlite3.Connection, path: str, parser, pos: int,
-                st: os.stat_result) -> None:
+                st: _Sig) -> None:
     _insert_file(conn, path, parser, pos, st,
                  parser.parse_metadata(path), parser.parse_session(path))
 
 
 def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
-                 st: os.stat_result, meta, session) -> None:
+                 st: _Sig, meta, session) -> None:
     """Store one file's parse results; st must be taken before parsing."""
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
         " session_id, workspace, title, started_at, ended_at, activity_ms,"
         " s_session_id, s_workspace, s_title, s_started_at, s_ended_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (path, parser.agent_slug, st.st_size, st.st_mtime_ns, pos,
+        (path, parser.agent_slug, st.size, st.mtime_ns, pos,
          *_fresh_fields(meta, session)))
     if session:
         conn.executemany(
@@ -389,12 +388,18 @@ def _indexed_rows(conn: sqlite3.Connection) -> dict:
     return {row["path"]: row for row in conn.execute("SELECT * FROM files")}
 
 
+class _Sig(NamedTuple):
+    """A session path's change signature; see _stat."""
+    size: int
+    mtime_ns: int
+
+
 class _Dirty(NamedTuple):
     """A listed file the index cannot answer for. st is None if stat failed."""
     path: str
     parser: object
     pos: int
-    st: os.stat_result | None
+    st: _Sig | None
 
 
 def _listed(rows: dict) -> list:
@@ -416,23 +421,33 @@ def _listed(rows: dict) -> list:
 
 def _check_dirty_bound(listed: list) -> None:
     dirty = {d.path: d for _, _, _, d in listed if d is not None}
-    size = sum(d.st.st_size for d in dirty.values() if d.st is not None)
+    size = sum(d.st.size for d in dirty.values() if d.st is not None)
     if len(dirty) > MAX_DIRTY_FILES or size > MAX_DIRTY_BYTES:
         raise _TooStale(f"{len(dirty)} changed files, {size} bytes;"
                         " run `pj index refresh`")
 
 
-def _stat(path: str) -> os.stat_result | None:
-    try:
-        return os.stat(path)
-    except OSError:
+def _stat(path: str) -> _Sig | None:
+    """Aggregate over fs_store._signature_paths, as fs_store.cache_signatures does.
+
+    A directory session (kimi) is represented by the files inside it, whose
+    growth does not change the directory's own stat. None if none can be stat'ed.
+    """
+    sts = []
+    for sig_path in fs_store._signature_paths(path):
+        try:
+            sts.append(os.stat(sig_path))
+        except OSError:
+            continue
+    if not sts:
         return None
+    return _Sig(sum(st.st_size for st in sts), max(st.st_mtime_ns for st in sts))
 
 
-def _clean_row(row, parser, st: os.stat_result | None):
+def _clean_row(row, parser, st: _Sig | None):
     if row is None or st is None or row["agent"] != parser.agent_slug:
         return None
-    if (st.st_size, st.st_mtime_ns) != (row["size"], row["mtime_ns"]):
+    if (st.size, st.mtime_ns) != (row["size"], row["mtime_ns"]):
         return None
     return row
 
