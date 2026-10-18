@@ -231,6 +231,15 @@ def _session_fields(session) -> tuple:
 
 _warned = False  # the fallback warning is printed once per process
 
+# Above either bound the index is too stale to help: fs_store answers, so a
+# burst of new history cannot make one search slower than fs_store's.
+MAX_DIRTY_FILES = 200
+MAX_DIRTY_BYTES = 500 * 1024 * 1024
+
+
+class _TooStale(Exception):
+    """The dirty set exceeds MAX_DIRTY_FILES or MAX_DIRTY_BYTES."""
+
 
 def _with_index(search, fallback):
     """search(conn) on the index; fallback() when the index cannot answer."""
@@ -244,6 +253,8 @@ def _with_index(search, fallback):
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:  # corrupt file, missing FTS5, ...
+        return _fall_back(fallback, str(exc))
+    except _TooStale as exc:
         return _fall_back(fallback, str(exc))
 
 
@@ -286,6 +297,14 @@ def _listed(rows: dict) -> list:
     return listed
 
 
+def _check_dirty_bound(listed: list) -> None:
+    dirty = {d.path: d for _, _, _, d in listed if d is not None}
+    size = sum(d.st.st_size for d in dirty.values() if d.st is not None)
+    if len(dirty) > MAX_DIRTY_FILES or size > MAX_DIRTY_BYTES:
+        raise _TooStale(f"{len(dirty)} changed files, {size} bytes;"
+                        " run `pj index refresh`")
+
+
 def _stat(path: str) -> os.stat_result | None:
     try:
         return os.stat(path)
@@ -303,6 +322,7 @@ def _clean_row(row, parser, st: os.stat_result | None):
 
 def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
     listed = _listed(_indexed_rows(conn))
+    _check_dirty_bound(listed)
     hits = _matching_messages(conn, query)
     parsed: dict = {}
     candidates = []
@@ -336,8 +356,10 @@ def _parse_and_keep(dirty: _Dirty, meta, parsed: dict):
 
 def _search_sessions(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
     """Titles come from files.title; fs_store's own loop decides the matches."""
+    listed = _listed(_indexed_rows(conn))
+    _check_dirty_bound(listed)
     metas = (parser.parse_metadata(path) if row is None else _stored_metadata(row)
-             for path, parser, row, _ in _listed(_indexed_rows(conn)))
+             for path, parser, row, _ in listed)
     return fs_store.search_titles(metas, query, limit=limit, sort=sort)
 
 

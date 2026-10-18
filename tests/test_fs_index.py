@@ -338,3 +338,16 @@ def test_write_back_keeps_files_owner_only_and_restores_the_umask(corpus, fs_ind
         os.umask(before)
     for created in paths.data_dir().iterdir():
         assert stat.S_IMODE(os.stat(created).st_mode) == 0o600, created
+
+
+@pytest.mark.parametrize("bound", [("MAX_DIRTY_FILES", 1), ("MAX_DIRTY_BYTES", 10)])
+def test_too_many_dirty_files_gives_fs_store_results(corpus, fs_index, monkeypatch, capsys, bound):
+    monkeypatch.setattr(fs_index, "_warned", False)
+    monkeypatch.setattr(fs_index, *bound)
+    fs_index.refresh()
+    new = {str(claude_session(corpus, "delta", "c8", 8, [("user", "fresh-needle-xyz")])),
+           str(claude_session(corpus, "delta", "c9", 9, [("user", "fresh title needle")]))}
+    assert_same_as_fs(fs_index, "needle")
+    assert fs_index.search_sessions("needle") == fs_store.search_sessions("needle")
+    assert "pj index refresh" in capsys.readouterr().err
+    assert not new & _indexed_paths()  # fs_store answered; nothing was written back
