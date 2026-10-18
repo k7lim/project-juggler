@@ -696,12 +696,10 @@ def _term_candidates(conn: sqlite3.Connection, rows: dict, words: list[str]) -> 
 
 
 def _word_candidates(conn: sqlite3.Connection, rows: dict, word: str) -> set[str]:
-    where, arg = _match_clause(conn, word)
-    ids = {file_id for (file_id,) in conn.execute(
-        f"SELECT DISTINCT file_id FROM messages WHERE {where}", (arg,))}
+    rowids = _matching_rowids(conn, _match_clause(conn, word))
     lowered = word.lower()
-    return {row["path"] for file_id, row in rows.items()
-            if file_id in ids or lowered in (row["title"] or "").lower()}
+    return {row["path"] for row in rows.values()
+            if _has_match(row, rowids) or lowered in (row["title"] or "").lower()}
 
 
 # --- SessionStore interface ---

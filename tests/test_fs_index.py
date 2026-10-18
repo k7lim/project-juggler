@@ -656,6 +656,19 @@ def test_scoped_search_loads_only_candidate_sessions(corpus, fs_index, monkeypat
     assert loaded == [_path(corpus, C1)]  # c2 is in alpha too, but has no "needle"
 
 
+def test_candidates_select_rowids_not_file_id(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    c3 = _path(corpus, ".claude/projects/-w-beta/c3.jsonl")
+    with monkeypatch.context() as patch:
+        statements = _trace_sql(patch)
+        assert fs_index.candidate_sessions(["needle"], "any", ["/w/alpha"]) == {_path(corpus, C1)}
+        assert fs_index.candidate_sessions(["CAFÉ"], "any", ALL_WS) == {c3}  # pj_count path
+    selects = [s for s in statements if "FROM messages" in s]
+    assert len(selects) == 2, statements
+    assert all(s.startswith("SELECT rowid FROM messages WHERE") for s in selects), selects
+    assert not [s for s in statements if "file_id" in s]
+
+
 # --- Schema v2: messages addressed by rowid range (pj-8qn.18) ---
 
 _V1_SCHEMA = """
