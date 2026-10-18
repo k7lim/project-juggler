@@ -163,7 +163,12 @@ port — a pinned port that is busy is reported as an error rather than moved.
 
 ### `pj index` - Opt-in session index
 
-Build and inspect the SQLite session index used by `PJ_BACKEND=index`:
+The default `fs` backend re-reads every session file on each search. That
+breaks down as history grows: at 8.3 GB / ~6.7k session files, content search
+takes 18-61 s and a `--project` search ~28-32 s. The SQLite index answers the
+same searches in 0.5-0.7 s with identical results.
+
+Opt in with `PJ_BACKEND=index`, then build and inspect it:
 
 ```bash
 pj index refresh             # Build or update the index; JSON added/updated/removed/rebuilt/seconds
@@ -175,6 +180,21 @@ pj index status --pretty     # One `key: value` line per field
 `pj index status` only stats session files and never creates the index. Only
 `pj index refresh` builds it; searches fall back to reading session files when
 the index is missing, corrupt or outdated.
+
+Run `pj index refresh` periodically (a no-op refresh takes ~0.8 s; the first
+build ~100 s). Searches stay correct without it: files changed since the last
+refresh are re-read directly. Once more than 200 files or 500 MiB have changed,
+searches fall back to reading all session files, with a warning, until you
+refresh again.
+
+The index lives at `$PJ_DATA_DIR/session_index.sqlite3`, by default
+`~/.local/share/pj/session_index.sqlite3` (file 0600, dir
+0700; ~0.8 GB for 8.3 GB of history) and holds the text of every session.
+Keep it on the host: never mount it, or `~/.local/share/pj`, into a sandbox.
+
+Revisit the design (see `docs/plans/fs-index.md`) when any of these is hit:
+20k session files, an index over 3 GB, search p95 over 1 s, a no-op refresh
+over 1 s, or history about double today's 8.3 GB.
 
 ### `pj ports` - Local runtime port discovery
 
@@ -469,7 +489,7 @@ session-store locations, use `PJ_SOURCES` below.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PJ_BACKEND` | `fs` | `cass` to use CASS SQLite backend |
+| `PJ_BACKEND` | `fs` | `index` for the opt-in session index (see `pj index`); `cass` for the CASS SQLite backend |
 | `PJ_SOURCES` | auto-detected | Extra session roots. Format: `agent:path:agent:path` |
 | `PJ_DATA_DIR` | `~/.local/share/pj` | Where annotations and cache live |
 | `PJ_CASS_DBS` | auto-detected | Colon-separated CASS database paths |
