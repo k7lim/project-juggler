@@ -961,8 +961,8 @@ def test_metadata_calls_fall_back_to_fs_store(meta_corpus, fs_index, monkeypatch
 
 
 def test_scoped_search_parses_no_clean_file(meta_corpus, fs_index, monkeypatch):
-    """discover's list_projects and sessions_by_project answer from the index;
-    only the one candidate session is loaded."""
+    """discover's list_projects, sessions_by_project and the candidate's
+    load_session_file all answer from the index: nothing is parsed."""
     from pj import paths
     expected = _search_with(fs_store, monkeypatch, "needle", project="alpha")
     assert expected
@@ -977,7 +977,7 @@ def test_scoped_search_parses_no_clean_file(meta_corpus, fs_index, monkeypatch):
         monkeypatch.setattr(parser, "parse_session", recording(parser.parse_session))
     monkeypatch.setattr(claude_code, "parse_session_tree", recording(claude_code.parse_session_tree))
     assert _search_with(fs_index, monkeypatch, "needle", project="alpha") == expected
-    assert set(parsed) == {_path(meta_corpus, C1)}  # the candidate's load_session_file
+    assert parsed == []
 
 
 # --- load_session_file from the index: schema v3 (pj-8qn.25) ---
@@ -1066,3 +1066,87 @@ def test_verify_repairs_tampered_load_fields(corpus, fs_index, sql):
     path = _path(corpus, B1) if "t_model" in sql else _path(corpus, X1)
     _tamper(sql, path)
     assert fs_index.refresh(verify=True)["mismatched"] == [path]
+
+
+def _all_session_files():
+    return [(path, parser.agent_slug) for root, parser in fs_store._configured_roots()
+            for path in parser.list_sessions(root)]
+
+
+def _loads(store):
+    return {path: store.load_session_file(path, agent) for path, agent in _all_session_files()}
+
+
+def test_load_corpus_exercises_both_claude_views(meta_corpus):
+    """Characterize the oracle: the branched file's tree differs from parse_session."""
+    branched_session(meta_corpus)
+    agents = {agent for _, agent in _all_session_files()}
+    assert agents == {"claude_code", "codex", "kimi"}
+    full = fs_store.load_session_file(_path(meta_corpus, B1), "claude_code")
+    assert [m["uuid"] for m in full["messages"]] == ["b1-0", "b1-2", "b1-3"]
+    assert {m["branch"] for m in full["messages"]} == {"active"}
+    assert "[Tool: Bash]" in full["messages"][1]["content"]
+    assert len(claude_code.parse_session(_path(meta_corpus, B1)).messages) == 4
+
+
+def test_load_session_file_matches_fs_store_for_every_file(meta_corpus, fs_index, monkeypatch):
+    branched_session(meta_corpus)
+    expected = _loads(fs_store)
+    assert all(expected.values())
+    fs_index.refresh()
+    _forbid_parsing(monkeypatch)  # clean files: the stored dicts, no parse
+    assert _loads(fs_index) == expected
+
+
+def test_load_session_file_delegates_for_a_dirty_file(meta_corpus, fs_index, monkeypatch):
+    branched_session(meta_corpus)
+    fs_index.refresh()
+    path = _append_claude(meta_corpus, B1, "b1", "appended after refresh")
+    parsed = []
+    real = claude_code.parse_session_tree
+    monkeypatch.setattr(claude_code, "parse_session_tree",
+                        lambda p, **kw: parsed.append(p) or real(p, **kw))
+    assert fs_index.load_session_file(path, "claude_code") == \
+        fs_store.load_session_file(path, "claude_code")
+    assert parsed == [path, path]  # fresh parse, then fs_store's oracle
+
+
+def test_load_session_file_delegates_for_unknown_paths_and_agents(corpus, fs_index):
+    fs_index.refresh()
+    c1 = _path(corpus, C1)
+    assert fs_index.load_session_file(c1, "codex") == fs_store.load_session_file(c1, "codex")
+    assert fs_index.load_session_file(c1, "nope") is None
+    assert fs_index.load_session_file(c1 + ".missing", "claude_code") is None
+
+
+def test_load_session_file_falls_back_without_an_index(corpus, fs_index, monkeypatch):
+    monkeypatch.setattr(fs_index, "_warned", True)
+    c1 = _path(corpus, C1)
+    assert fs_index.load_session_file(c1, "claude_code") == \
+        fs_store.load_session_file(c1, "claude_code")
+
+
+def test_written_back_claude_file_serves_its_tree(meta_corpus, fs_index, monkeypatch):
+    branched_session(meta_corpus)
+    fs_index.refresh()
+    path = _append_claude(meta_corpus, B1, "b1", "write-back-term-qq")
+    assert_same_as_fs(fs_index, "write-back-term-qq")  # writes b1 back, tree included
+    expected = fs_store.load_session_file(path, "claude_code")
+    _forbid_parsing(monkeypatch)
+    assert fs_index.load_session_file(path, "claude_code") == expected
+    _assert_rowid_ranges_exact()
+
+
+def test_write_back_never_stores_a_claude_file_without_its_tree(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    path = _append_claude(corpus, C1, "c1", "no-tree-term-qq")
+    with monkeypatch.context() as patch:
+        patch.setattr(claude_code, "parse_session_tree", lambda *a, **k: None)
+        assert fs_index.search_content("no-tree-term-qq")  # parses c1 for write-back
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        (size,) = conn.execute("SELECT size FROM files WHERE path = ?", (path,)).fetchone()
+    finally:
+        conn.close()
+    assert size != os.path.getsize(path)  # still dirty: not written back

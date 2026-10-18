@@ -8,7 +8,8 @@ refresh() builds the index file. search_content, search_sessions and the
 metadata calls (list_projects, recent_session_counts, sessions_by_project,
 project_sessions) answer unchanged files from it and parse only the dirty
 set (new or changed files); candidate_sessions narrows search's scan path
-from it. The other calls still delegate to fs_store.
+from it and load_session_file serves its sessions. The other calls still
+delegate to fs_store.
 """
 from __future__ import annotations
 
@@ -869,7 +870,19 @@ def get_session(
 
 
 def load_session_file(source_path: str, agent: str) -> dict | None:
-    return fs_store.load_session_file(source_path, agent)
+    """The stored load_session_file dict for a clean file; fs_store's otherwise."""
+    return _with_index(
+        lambda conn: _load_session_file(conn, source_path, agent),
+        lambda: fs_store.load_session_file(source_path, agent))
+
+
+def _load_session_file(conn: sqlite3.Connection, path: str, agent: str) -> dict | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
+    st = _stat(path) if row is not None and row["agent"] == agent else None
+    if st is None or (st.size, st.mtime_ns) != (row["size"], row["mtime_ns"]):
+        return fs_store.load_session_file(path, agent)  # dirty, unknown or gone
+    return _stored_full(conn, row)
 
 
 def candidate_sessions(terms: list[str], match: str,
