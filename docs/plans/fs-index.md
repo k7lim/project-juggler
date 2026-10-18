@@ -412,3 +412,52 @@ rerun. Revisit condition: if the rerun still fails, delete.
    (pj-8qn.13).
 
 All of these touch `pj/fs_index.py`, so they run one at a time in this order.
+
+### Gate result, iteration 2 (pj-8qn.13 rerun, host, 2026-10-18)
+
+Build 85 s, 0.74 GB, no-op refresh 0.57 s (pass).
+
+Content search (`search_content`, limit 100, newest):
+
+| term | fs | index (iteration 1 -> 2) |
+|---|---|---|
+| auth | 18.6 s | 1251 -> 371 ms |
+| middleware | 31.3 s | 273 -> 387 ms |
+| nono | 21.2 s | 1690 -> 307 ms |
+| launchd | 45.1 s | 1620 -> 566 ms |
+| rate limit | 23.1 s | 1797 -> 435 ms |
+| pytest | 46.2 s | 1636 -> 533 ms |
+| classifier | 29.8 s | 1632 -> 373 ms (same: False, see below) |
+| yolobox | 20.6 s | 2035 -> 393 ms |
+| zyzzyva-absent | 62.1 s | 2387 -> 642 ms |
+
+p95 0.64 s (pass). Median speedup about 80x (pass). The `classifier`
+mismatch did not reproduce: rerun right after, fs and index gave identical
+stable lists (99 sessions). The likely cause is the benchmark itself. fs and
+index run about 30 s apart at `limit=100`; a session that starts matching
+in between pushes one older session out of the index's top 100. `_stable`
+drops the new session but cannot restore the one it displaced. The parity
+check must allow for this: compare after removing as many tail entries as
+there are unstable sessions.
+
+Scoped CLI search (`search.search(term, project="project-juggler")`,
+discover cache off):
+
+| term | fs | index | sessions |
+|---|---|---|---|
+| pytest | 34.3 s | 1191 ms | 3 |
+| nono | 30.3 s | 997 ms | 5 |
+| rate limit | 30.5 s | 2125 ms | 5 |
+
+Results identical. p95 2.13 s (budget 1 s: FAIL). Speedup 14-34x.
+
+A warm scoped search takes 1.2 s:
+- 0.45 s: `load_session_file` still parses each candidate's JSON through
+  fs_store. "rate limit" had 34 candidates for 5 matches, because the
+  per-word filter is loose.
+- 0.32 s: `_listed` runs once per store call (3 times), and each run stats
+  about 6.6k paths with 2 syscalls each since pj-8qn.17.
+- 0.30 s: `discover`.
+- 0.17 s: the per-word title check loops in Python over every row.
+- First-run cost: dirty files are parsed on the metadata path and never
+  written back.
