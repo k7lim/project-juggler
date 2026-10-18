@@ -428,3 +428,13 @@ def test_plain_refresh_does_not_sample(corpus, fs_index, monkeypatch):
     fs_index.refresh()
     result = fs_index.refresh()
     assert "checked" not in result
+
+
+@pytest.mark.parametrize("column", ["title", "s_title"])
+def test_verify_repairs_a_tampered_session_field(corpus, fs_index, column):
+    fs_index.refresh()
+    path = str(sessions_home(corpus) / ".codex/sessions/2026/09/02/rollout-x1.jsonl")
+    _tamper(f"UPDATE files SET {column} = 'tampered' WHERE path = ?", path)
+    assert fs_index.refresh(verify=True)["mismatched"] == [path]
+    assert fs_index.refresh(verify=True)["mismatched"] == []
+    assert fs_index.search_sessions("needle") == fs_store.search_sessions("needle")

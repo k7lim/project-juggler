@@ -220,9 +220,7 @@ def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
         " s_session_id, s_workspace, s_title, s_started_at, s_ended_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (path, parser.agent_slug, st.st_size, st.st_mtime_ns, pos,
-         *_session_fields(meta),
-         fs_store._activity_ms(meta) if meta else 0,
-         *_session_fields(session)))
+         *_fresh_fields(meta, session)))
     if session:
         conn.executemany(
             "INSERT INTO messages(content, role, file_id, ord) VALUES (?, ?, ?, ?)",
@@ -240,7 +238,8 @@ def _session_fields(session) -> tuple:
 # --- Divergence check ---
 # Size plus mtime misses a file rewritten with the same size and mtime, so
 # refresh(verify=True) compares a random sample with a fresh parse.
-# "Mismatch" means the stored messages (content, role, order) differ.
+# "Mismatch" means the stored messages (content, role, order) or the stored
+# session fields (metadata, s_* and activity_ms) differ.
 
 def _verify_locked(index: Path, sample_size: int, rng: random.Random) -> dict:
     conn = _open_current(index)  # refresh just made it current
@@ -256,24 +255,35 @@ def _verify_locked(index: Path, sample_size: int, rng: random.Random) -> dict:
 def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> dict:
     """Re-index every sampled file whose stored copy differs from a fresh parse."""
     parsers = {parser.agent_slug: parser for _, parser in fs_store._configured_roots()}
-    rows = [r for r in conn.execute("SELECT id, path, agent, list_pos FROM files ORDER BY id")
-            if r[2] in parsers]
+    rows = [r for r in conn.execute(f"SELECT id, path, agent, list_pos, {_FIELDS} FROM files"
+                                    " ORDER BY id") if r[2] in parsers]
     sample = rng.sample(rows, min(sample_size, len(rows)))
     stored = _stored_messages(conn, [r[0] for r in sample])
     checked, bad = 0, []
-    for file_id, path, agent, pos in sample:
+    for file_id, path, agent, pos, *fields in sample:
         st = _stat(path)  # taken before parsing, as _insert_file requires
         if st is None:
             continue  # gone since the sync; the next refresh drops it
         checked += 1
         parser = parsers[agent]
         meta, session = parser.parse_metadata(path), parser.parse_session(path)
-        if stored.get(file_id, []) != _fresh_messages(session):
+        if (stored.get(file_id, []) != _fresh_messages(session)
+                or tuple(fields) != _fresh_fields(meta, session)):
             bad.append((file_id, path, parser, pos, st, meta, session))
     _delete_files(conn, [b[0] for b in bad])
     for _, path, parser, pos, st, meta, session in bad:
         _insert_file(conn, path, parser, pos, st, meta, session)
     return {"checked": checked, "mismatched": sorted(b[1] for b in bad), "repaired": len(bad)}
+
+
+_FIELDS = ("session_id, workspace, title, started_at, ended_at, activity_ms,"
+           " s_session_id, s_workspace, s_title, s_started_at, s_ended_at")
+
+
+def _fresh_fields(meta, session) -> tuple:
+    """The _FIELDS values _insert_file would store for this parse."""
+    return (*_session_fields(meta), fs_store._activity_ms(meta) if meta else 0,
+            *_session_fields(session))
 
 
 def _stored_messages(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
