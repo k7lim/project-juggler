@@ -18,6 +18,7 @@ import functools
 import os
 import random
 import sqlite3
+import stat
 import sys
 import time
 from contextlib import contextmanager
@@ -449,11 +450,18 @@ def _check_dirty_bound(listed: list) -> None:
 
 
 def _stat(path: str) -> _Sig | None:
-    """Aggregate over fs_store._signature_paths, as fs_store.cache_signatures does.
+    """One os.stat for a file; for a directory, aggregate as fs_store does.
 
-    A directory session (kimi) is represented by the files inside it, whose
-    growth does not change the directory's own stat. None if none can be stat'ed.
+    A directory session (kimi) is represented by the files inside it
+    (fs_store._signature_paths), whose growth does not change the directory's
+    own stat. None if nothing can be stat'ed.
     """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return _Sig(st.st_size, st.st_mtime_ns)
     sts = []
     for sig_path in fs_store._signature_paths(path):
         try:
@@ -462,7 +470,7 @@ def _stat(path: str) -> _Sig | None:
             continue
     if not sts:
         return None
-    return _Sig(sum(st.st_size for st in sts), max(st.st_mtime_ns for st in sts))
+    return _Sig(sum(s.st_size for s in sts), max(s.st_mtime_ns for s in sts))
 
 
 def _clean_row(row, parser, st: _Sig | None):

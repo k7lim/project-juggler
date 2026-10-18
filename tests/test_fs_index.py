@@ -205,6 +205,24 @@ def test_refresh_updates_an_appended_kimi_session(corpus, fs_index, monkeypatch)
     assert fs_index.search_content("kimi-appended-zz") == expected
 
 
+def test_stat_signature_is_one_stat_for_a_file_and_the_aggregate_for_a_dir(
+        corpus, fs_index, monkeypatch):
+    session_dir = kimi_session(corpus, "k1", ["kimi needle"])
+    file_path = str(sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl")
+    file_st = os.stat(file_path)
+    parts = [os.stat(p) for p in fs_store._signature_paths(str(session_dir))]
+    assert len(parts) == 2
+    calls = []
+    real_stat = os.stat
+    monkeypatch.setattr(os, "stat", lambda p, *a, **k: calls.append(p) or real_stat(p, *a, **k))
+
+    assert fs_index._stat(file_path) == (file_st.st_size, file_st.st_mtime_ns)
+    assert calls == [file_path]
+    assert fs_index._stat(str(session_dir)) == (
+        sum(st.st_size for st in parts), max(st.st_mtime_ns for st in parts))
+    assert fs_index._stat(str(session_dir / "missing")) is None
+
+
 def test_deleted_session_disappears(corpus, fs_index):
     fs_index.refresh()
     (sessions_home(corpus) / ".claude/projects/-w-alpha/c1.jsonl").unlink()
