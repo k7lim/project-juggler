@@ -5,8 +5,8 @@ content search: same results, same freshness, and a safe fallback.  These
 tests are that contract.  They are strict-xfail until pj/fs_index.py exists;
 remove the mark when they pass.
 
-Assumed interface (SessionStore gains sessions_by_project, which fs_index
-must implement too):
+Assumed interface (SessionStore gains sessions_by_project and
+load_session_file, which fs_index must implement too):
   pj.fs_index            -- module implementing the SessionStore protocol
   pj.fs_index.refresh()  -- bring the index up to date with the session files
   pj.paths.index_path()  -- where the index file lives (under data_dir())
@@ -208,5 +208,5 @@ def test_backend_env_selects_the_index(home, monkeypatch, fs_index):
 def test_index_implements_the_whole_session_store_protocol(fs_index):
     for name in ("available", "list_projects", "recent_session_counts", "project_sessions",
                  "session_details", "search_sessions", "search_content", "get_session",
-                 "sessions_by_project"):
+                 "sessions_by_project", "load_session_file"):
         assert callable(getattr(fs_index, name)), name

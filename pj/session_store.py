@@ -118,6 +118,14 @@ class SessionStore(Protocol):
         """
         ...
 
+    def load_session_file(self, source_path: str, agent: str) -> dict | None:
+        """Load a full session from its file, skipping get_session's id lookup.
+
+        source_path and agent come from a sessions_by_project summary.
+        Returns the get_session shape, or None if no parser handles agent.
+        """
+        ...
+
 
 # --- Store registry ---
 

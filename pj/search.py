@@ -230,7 +230,7 @@ def _scan_sessions(
 
     for _, project, summary in summaries:
         title = summary.get("title") or ""
-        if summary.get("source_path") and hasattr(store, "load_session_file"):
+        if summary.get("source_path"):
             full = store.load_session_file(summary["source_path"], summary.get("agent", ""))
         else:
             full = store.get_session(str(summary.get("session_id", "")))

@@ -487,6 +487,14 @@ def test_cass_facade_sessions_by_project_loops_project_sessions():
     assert calls == [("/tmp/a", 9999), ("/tmp/b", 9999)]
 
 
+def test_cass_facade_load_session_file_delegates_to_fs_store():
+    """cass_facade has no message content; fs_store loads the file."""
+    session = {"session_id": "s1", "messages": []}
+    with mock.patch.object(fs_store, "load_session_file", return_value=session) as load:
+        assert cass_facade.load_session_file("/tmp/s1.jsonl", "claude_code") is session
+    load.assert_called_once_with("/tmp/s1.jsonl", "claude_code")
+
+
 def test_search_scan_loads_sessions_by_path_not_id():
     """A full scan must not do a per-session id lookup across all roots."""
     from pj import search as search_mod
@@ -2552,6 +2560,9 @@ class FakeStore:
 
     def sessions_by_project(self, workspace_paths: list[str]) -> dict[str, list[dict]]:
         return {path: self.project_sessions(path, limit=9999) for path in workspace_paths}
+
+    def load_session_file(self, source_path: str, agent: str) -> dict | None:
+        return None
 
     def session_details(self, session_ids: list) -> dict:
         return {}

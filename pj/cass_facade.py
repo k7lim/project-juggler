@@ -447,6 +447,12 @@ def get_session(
     )
 
 
+def load_session_file(source_path: str, agent: str) -> dict | None:
+    """CASS indexes metadata only; delegate to fs_store for full sessions."""
+    from . import fs_store
+    return fs_store.load_session_file(source_path, agent)
+
+
 def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:
     """Extract a snippet around the first occurrence of query in content."""
     lower = content.lower()
