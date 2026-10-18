@@ -77,6 +77,42 @@ def refresh(verify: bool = False, sample_size: int = VERIFY_SAMPLE,
     return counts
 
 
+def status() -> dict:
+    """Describe the index file without parsing sessions or creating any file."""
+    index = paths.index_path()
+    info = {"path": str(index), "exists": index.exists(), "bytes": None,
+            "schema_version": None, "schema_matches": False,
+            "indexed_files": None, "dirty_files": None, "built_at": None,
+            "fts5": _fts5_available()}
+    if not info["exists"]:
+        return info
+    info["bytes"] = index.stat().st_size
+    # mode=rw never creates the file; mode=ro cannot open a WAL file without its -shm.
+    conn = sqlite3.connect(index.as_uri() + "?mode=rw", uri=True)
+    try:
+        meta = dict(conn.execute("SELECT key, value FROM meta"))
+        info["schema_version"] = meta.get("schema_version")
+        info["built_at"] = meta.get("built_at")
+        info["schema_matches"] = info["schema_version"] == SCHEMA_VERSION
+        if info["schema_matches"]:
+            listed = _listed(_indexed_rows(conn))
+            info["indexed_files"] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            info["dirty_files"] = sum(1 for _, _, _, dirty in listed if dirty is not None)
+    except sqlite3.DatabaseError:
+        pass  # corrupt: report what is known; refresh() rebuilds it
+    finally:
+        conn.close()
+    return info
+
+
+def _fts5_available() -> bool:
+    try:
+        _require_fts5()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _require_fts5() -> None:
     conn = sqlite3.connect(":memory:")
     try:

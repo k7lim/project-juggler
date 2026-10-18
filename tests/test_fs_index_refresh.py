@@ -90,3 +90,47 @@ def test_corrupt_index_is_rebuilt(corpus, fs_index):
     paths.index_path().write_bytes(b"not a database")
     assert fs_index.refresh()["rebuilt"] is True
     assert _meta("schema_version") == (fs_index.SCHEMA_VERSION,)
+
+
+def test_status_of_a_missing_index_creates_nothing(home, fs_index):
+    info = fs_index.status()
+    assert info["exists"] is False and info["path"] == str(paths.index_path())
+    assert info["indexed_files"] is None and info["schema_matches"] is False
+    assert not paths.data_dir().exists()  # a sensor
+
+
+def test_status_after_refresh_counts_files_without_parsing(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    parses = _count_parses(monkeypatch)
+    info = fs_index.status()
+    assert parses == []
+    assert info["exists"] is True and info["bytes"] > 0
+    assert info["schema_version"] == fs_index.SCHEMA_VERSION and info["schema_matches"] is True
+    assert info["indexed_files"] == 6 and info["dirty_files"] == 0
+    assert info["built_at"] == _meta("built_at")[0]
+    assert info["fts5"] is True
+
+
+def test_status_counts_a_changed_file_as_dirty(corpus, fs_index):
+    from tests.test_fs_index import codex_session
+    fs_index.refresh()
+    codex_session(corpus, "delta", "x9", 7, [("user", "new")])
+    assert fs_index.status()["dirty_files"] == 1
+
+
+def test_status_reports_a_wrong_schema_version(corpus, fs_index):
+    fs_index.refresh()
+    conn = sqlite3.connect(str(paths.index_path()))
+    with conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    conn.close()
+    info = fs_index.status()
+    assert info["schema_version"] == "0" and info["schema_matches"] is False
+    assert info["indexed_files"] is None
+
+
+def test_status_of_a_corrupt_index(corpus, fs_index):
+    fs_index.refresh()
+    paths.index_path().write_bytes(b"not a database")
+    info = fs_index.status()
+    assert info["exists"] is True and info["schema_matches"] is False
