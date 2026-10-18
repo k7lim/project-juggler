@@ -29,6 +29,27 @@ background scan (yolobox-pattern `174f9ad`, live 2026-10-16) in
 switching the service to the index. The first sample: `/search` 32.6 s =
 23.9 s pj scan + 8.7 s redaction.
 
+### Cheaper fixes already tried (complexity guide #2)
+
+| Fix | Result | Why it is not enough |
+|-----|--------|----------------------|
+| Remove quadratic paths (`pj-t1b`) | Done, `be86122`, `d5abdb4` | Still parses every candidate session in full |
+| `rg` prefilter (service only, `pj-f20`) | Live in the query service | 2026-10-16 log: 1 term, 551 candidates, 23.9 s scan; 7 terms, 8,002 candidates, 117 s scan, client got 504 at 90 s. Common terms match most files |
+| Decode only lines containing the term | 30.8 s -> 28 s | Under 10% faster, and it changed result fields; reverted |
+| In-memory cache in the service | 398 MB, 50-65 s cold load | Does not help the CLI or other short-lived processes |
+| Lower `backend_limit` | Not tried | Fewer results is a behaviour change, not a speedup |
+
+The cost is reading 8.3 GB of JSON to search 197 MB of text. Every fix
+above still pays it. An index pays it once.
+
+### Trade (complexity guide #4)
+
+The index makes content and title search cheap (seconds to milliseconds).
+In exchange we own:
+- a 0.76 GB second copy of every session's text, as sensitive as the history;
+- a second search path whose parity with `fs_store` must be kept;
+- schema versions, a lock, and rebuilds.
+
 ## Decision
 
 Add `pj/fs_index.py`, a `SessionStore` backend backed by one SQLite file with
@@ -54,6 +75,46 @@ The interface is the one the gate already encodes (`tests/test_fs_index.py`):
   `load_session_file` delegates to `fs_store`, as `get_session` already does.
 - `search._scan_sessions` calls both directly; the `hasattr` branches go.
 - `fs_index` implements both (phase 1: delegate to `fs_store`).
+
+### Protocol change: narrowing the scan path (choice 1, chosen 2026-10-17)
+
+Usage study (2026-10-17, 1,121 past searches; 679 outside pj dev and
+benchmarks): 61% of real searches are plain. Almost all of the rest use
+`--project` / `--here` and go through `search._scan_sessions`, and their share
+grew from 20% in May to about 50% in Sep–Oct. `match=all` is 9%, regex 3%. So
+the index must also narrow the scan path. Add one method:
+
+```python
+def candidate_sessions(terms: list[str], match: str,
+                       workspace_paths: list[str]) -> set[str] | None:
+    """Source paths of sessions in these workspaces that may match.
+
+    A superset of the sessions _scan_sessions would match. None means
+    "no narrowing": scan every session, as today."""
+```
+
+- `fs_store` and `cass_facade` return `None`, so their behaviour does not change.
+- `search._scan_sessions` calls it when `regex` is false, and loads only the
+  summaries whose `source_path` is in the set. It still parses those files
+  in full and runs the same matching code, so results do not change.
+- `fs_index` returns `None` if the index is missing, corrupt or over the dirty
+  bound, or if any term gives no usable filter (see below).
+
+The set must be a superset, or results get lost. `_scan_sessions` matches
+against `" ".join([title, *message_texts])`, at the session level:
+
+- **Per session, not per message.** A term is a candidate hit if the title or
+  any message contains it. `match=all` is the intersection of the per-term
+  session sets; `match=any` is the union.
+- **Phrases can span messages** through the joining space (`"ends with"` +
+  `"alpha"` contains `"with alpha"`). So a term with whitespace is filtered by
+  each of its words separately (AND). Each word lies inside one message or the
+  title, so this is a superset.
+- **Unfilterable words.** A word shorter than 3 characters gives no trigram
+  filter. For `match=all`, drop it from the intersection. For `match=any`,
+  return `None`. Non-ASCII words use the `instr` scan described below.
+- **Dirty files** (changed since the last write-back) are always in the set.
+- **Titles** are matched against `files.title`.
 - Update the protocol list in
   `test_index_implements_the_whole_session_store_protocol` and the header of
   `tests/test_fs_index.py`, which says "no new SessionStore methods".
@@ -114,6 +175,18 @@ On every search:
 Appended sessions are re-indexed whole. That costs one file parse, the same as
 `fs_store` pays for that file today.
 
+**Bound (complexity guide #7).** A search parses at most `MAX_DIRTY_FILES`
+(start at 200) or `MAX_DIRTY_BYTES` (start at 500 MB) of dirty files. Above
+that, the index is too stale to help, so the search returns `fs_store` results
+and warns "run `pj index refresh`". A burst of new history (October added
+2.8 GB) then cannot make one search slower than today's search.
+
+**Divergence check (complexity guide #5).** Size plus mtime misses a file
+rewritten with the same size and mtime. That is rare, so it is not checked per
+search. It is caught by `refresh(verify=True)`, which compares a sample of
+indexed sessions with a fresh parse and reports any mismatches. The worth-it
+benchmark is the full version of that check.
+
 ### Concurrency model (principle #14)
 
 - **Single writer.** `fcntl.flock(LOCK_EX | LOCK_NB)` on
@@ -152,7 +225,10 @@ history. The file, its `-wal`, `-shm` and `.lock` files are 0600 (create with
 The index must stay host-only. No yolobox-pattern config or doc mounts
 `~/.local/share/pj` (checked 2026-10-16), but that is not proof. **Rollout
 gate:** confirm that the installed nono profile cannot read
-`~/.local/share/pj` before building the index on the host.
+`~/.local/share/pj` before building the index on the host. Then make that
+check automatic (complexity guide #8): add an assertion to yolobox-pattern's
+`tests/test-pj-private-boundary.sh` that a sandbox read of the index path
+fails.
 
 ## Rollout (principle #21)
 
@@ -165,15 +241,24 @@ gate:** confirm that the installed nono profile cannot read
    lines with the baseline: `pj_ms` and scan `ms` for `cache_hit=false`.
 5. Changing the default is a separate decision.
 
-## Out of scope for phase 1: the scan path
+## Whole path (complexity guide #11)
 
-`search.search` goes through `_scan_sessions`, not `search_content`, when the
-search is project-scoped, regex, or multi-term `match=all`. Phase 1 does not
-speed that path up: `fs_index.load_session_file` delegates to `fs_store`.
-Possible phase 2: serve `load_session_file` from stored messages, or narrow
-`_scan_sessions` with the index. Decide from the baseline. The service logs
-`project` and `match` per request, so the share of scoped searches can be
-counted.
+For the CLI, search is the whole wait, so the index is the whole win. For the
+query service, a request waits on the pj scan and then on redaction. In the
+first sample, redaction took 8.7 s of 32.6 s. With a 1 s index, that request
+would take about 10 s, and redaction would become the slowest step. The parked
+classifier-speed options (a shorter reply format, a dedicated model instance)
+are next for the service. Its `redact_ms` metric shows when.
+
+## Out of scope: regex and common words on the scan path
+
+`candidate_sessions` does not help regex searches (3% of searches), which still
+scan every session. It helps less for common words in large projects, because
+the candidate set is large. Serving `load_session_file` from the index would fix
+both, but the index would then have to store full sessions (tool calls,
+branches) and keep every field identical to the files. That was rejected on
+2026-10-17. Revisit it if the service's `metric` lines show scoped scans that
+are still slow after rollout.
 
 ## Scaling threshold (principle #22)
 
@@ -190,12 +275,21 @@ counted.
 ## Steps (TDD against the existing gate)
 
 1. Protocol change (a): `session_store`, `cass_facade`, `search.py`, tests.
+   Add `candidate_sessions` to the protocol in the same step (one commit per
+   method, principle #18).
 2. `paths.index_path()`; a `fs_index` skeleton that delegates everything to
    `fs_store`. The protocol, missing-index and env-selection tests pass.
 3. `refresh()`: schema, full build, atomic replace, 0600, lock.
 4. `search_content` and `search_sessions` through the index with the Python
    recheck: the parity and limit tests.
-5. The dirty set: the new, appended and deleted tests.
+5. The dirty set: the new, appended and deleted tests, plus a test that a
+   dirty set over the bound falls back to `fs_store`. Then `refresh(verify=True)`.
+5b. `candidate_sessions`: first add `fs_store`'s `None` and the
+   `_scan_sessions` call (no behaviour change, full suite green). Then the index
+   version, gated by new parity tests. `search.search` with `project=`, with
+   `match="all"`, and with a phrase that spans two messages must return the
+   same results under `fs_store` and `fs_index`. Also test that a
+   2-character word under `match=any` gives `None`.
 6. Corrupt and wrong-schema fallback; idempotent refresh.
 7. Remove every `@pending`; run the full suite.
 8. Host benchmark (rollout step 2). The nono check (privacy gate).
