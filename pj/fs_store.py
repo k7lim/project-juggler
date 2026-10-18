@@ -66,15 +66,15 @@ def _configured_roots() -> list[tuple[str, object]]:
     return pairs
 
 
-def _all_sessions_metadata() -> list[base.NormalizedSession]:
-    """Scan all roots, parse metadata only (fast)."""
-    sessions = []
-    for root, parser in _configured_roots():
-        for path in parser.list_sessions(root):
-            meta = parser.parse_metadata(path)
-            if meta:
-                sessions.append(meta)
-    return sessions
+def _listed_metadata():
+    """parse_metadata (NormalizedSession or None) per listed path, in list_sessions order.
+
+    The metadata calls below take this shape so that fs_index can feed them
+    stored rows instead, and both backends share one loop.
+    """
+    return (parser.parse_metadata(path)
+            for root, parser in _configured_roots()
+            for path in parser.list_sessions(root))
 
 
 def _group_by_workspace(
@@ -174,17 +174,25 @@ def available() -> bool:
 
 
 def list_projects(detail: bool = False) -> list[dict]:
-    sessions = _all_sessions_metadata()
-    grouped = _group_by_workspace(sessions, detail=detail)
+    return group_projects(_listed_metadata(), detail=detail)
+
+
+def group_projects(metas, detail: bool = False) -> list[dict]:
+    """list_projects over metadata (NormalizedSession or None) in list_sessions order."""
+    grouped = _group_by_workspace([m for m in metas if m], detail=detail)
     return sorted(grouped.values(), key=lambda p: p["last_active"] or "", reverse=True)
 
 
 def recent_session_counts(days: int = 7) -> dict[str, int]:
+    return count_recent(_listed_metadata(), days=days)
+
+
+def count_recent(metas, days: int = 7) -> dict[str, int]:
+    """recent_session_counts over metadata (NormalizedSession or None) in list_sessions order."""
     cutoff_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-    sessions = _all_sessions_metadata()
     counts: dict[str, int] = {}
-    for s in sessions:
-        if s.started_at and s.started_at >= cutoff_ms:
+    for s in metas:
+        if s and s.started_at and s.started_at >= cutoff_ms:
             ws = s.workspace or "(no workspace)"
             counts[ws] = counts.get(ws, 0) + 1
     return counts
@@ -228,7 +236,12 @@ def _sort_summaries(results: list[dict]) -> list[dict]:
 
 
 def project_sessions(workspace_path: str, limit: int = 50) -> list[dict]:
-    sessions = sessions_by_project([workspace_path]).get(workspace_path, [])[:limit]
+    return project_summaries(_listed_metadata(), workspace_path, limit=limit)
+
+
+def project_summaries(metas, workspace_path: str, limit: int = 50) -> list[dict]:
+    """project_sessions over metadata (NormalizedSession or None) in list_sessions order."""
+    sessions = summaries_by_project(metas, [workspace_path]).get(workspace_path, [])[:limit]
     for summary in sessions:
         summary.pop("source_path", None)
     return sessions
@@ -241,15 +254,18 @@ def sessions_by_project(workspace_paths: list[str]) -> dict[str, list[dict]]:
     metadata per project, which is quadratic across a whole-history search.
     Summaries also carry "source_path" for load_session_file.
     """
+    return summaries_by_project(_listed_metadata(), workspace_paths)
+
+
+def summaries_by_project(metas, workspace_paths: list[str]) -> dict[str, list[dict]]:
+    """sessions_by_project over metadata (NormalizedSession or None) in list_sessions order."""
     wanted = set(workspace_paths)
     grouped: dict[str, list[dict]] = {}
-    for root, parser in _configured_roots():
-        for path in parser.list_sessions(root):
-            meta = parser.parse_metadata(path)
-            if not meta or meta.workspace not in wanted:
-                continue
-            summary = {**_session_summary(meta), "source_path": meta.source_path}
-            grouped.setdefault(meta.workspace, []).append(summary)
+    for meta in metas:
+        if not meta or meta.workspace not in wanted:
+            continue
+        summary = {**_session_summary(meta), "source_path": meta.source_path}
+        grouped.setdefault(meta.workspace, []).append(summary)
     return {ws: _sort_summaries(results) for ws, results in grouped.items()}
 
 
@@ -260,10 +276,7 @@ def session_details(session_ids: list) -> dict:
 
 def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search session titles for substring matches."""
-    metas = (parser.parse_metadata(path)
-             for root, parser in _configured_roots()
-             for path in parser.list_sessions(root))
-    return search_titles(metas, query, limit=limit, sort=sort)
+    return search_titles(_listed_metadata(), query, limit=limit, sort=sort)
 
 
 def search_titles(metas, query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
