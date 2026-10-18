@@ -443,6 +443,12 @@ def load_session_file(source_path: str, agent: str) -> dict | None:
     return _session_to_dict(session) if session else None
 
 
+def candidate_sessions(terms: list[str], match: str,
+                       workspace_paths: list[str]) -> set[str] | None:
+    """No index to narrow with: None, so _scan_sessions scans every session."""
+    return None
+
+
 def _session_to_dict(session: base.NormalizedSession) -> dict:
     """Convert NormalizedSession to a plain dict for the envelope."""
     started_iso = None

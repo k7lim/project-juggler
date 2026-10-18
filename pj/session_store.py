@@ -126,6 +126,14 @@ class SessionStore(Protocol):
         """
         ...
 
+    def candidate_sessions(self, terms: list[str], match: str,
+                           workspace_paths: list[str]) -> set[str] | None:
+        """Source paths of sessions in these workspaces that may match.
+
+        A superset of the sessions _scan_sessions would match. None means
+        "no narrowing": scan every session, as today."""
+        ...
+
 
 # --- Store registry ---
 

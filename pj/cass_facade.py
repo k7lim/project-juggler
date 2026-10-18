@@ -453,6 +453,12 @@ def load_session_file(source_path: str, agent: str) -> dict | None:
     return fs_store.load_session_file(source_path, agent)
 
 
+def candidate_sessions(terms: list[str], match: str,
+                       workspace_paths: list[str]) -> set[str] | None:
+    """CASS gives no narrowing: None, so _scan_sessions scans every session."""
+    return None
+
+
 def _extract_snippet(content: str, query: str, context_chars: int = 120) -> str:
     """Extract a snippet around the first occurrence of query in content."""
     lower = content.lower()

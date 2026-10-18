@@ -530,6 +530,86 @@ def test_search_scan_loads_sessions_by_path_not_id():
     assert sorted(h["session_id"] for h in content) == ["s1", "s2"]
 
 
+class _NarrowingStore:
+    """The store methods _scan_sessions uses, with a settable candidate set."""
+
+    def __init__(self, candidates):
+        self.sessions = [
+            {"session_id": sid, "agent": "fake", "title": f"title {sid}",
+             "started_at": f"2026-01-0{i + 1}T00:00:00+00:00", "source_path": f"/src/{sid}"}
+            for i, sid in enumerate(["s1", "s2", "s3"])
+        ]
+        self.candidates = candidates
+        self.loaded: list[str] = []
+        self.candidate_calls: list[tuple] = []
+
+    def sessions_by_project(self, workspace_paths):
+        return {"/tmp/proj": list(self.sessions)}
+
+    def get_session(self, session_id, **_kwargs):
+        raise AssertionError("id lookup")
+
+    def load_session_file(self, source_path: str, agent: str) -> dict | None:
+        self.loaded.append(source_path)
+        sid = source_path.rsplit("/", 1)[-1]
+        return {"session_id": sid, "messages": [{"content": f"{sid} zebra"}]}
+
+    def candidate_sessions(self, terms, match, workspace_paths):
+        self.candidate_calls.append((terms, match, workspace_paths))
+        return self.candidates
+
+
+def _scan_with(store, terms, patterns=None):
+    from pj import search as search_mod
+    from pj.session_store import set_store, get_store
+
+    previous = get_store()
+    set_store(store)
+    try:
+        return search_mod._scan_sessions(
+            [{"path": "/tmp/proj"}], terms, match="any", patterns=patterns,
+            limit=10, sort="newest")
+    finally:
+        set_store(previous)
+
+
+def test_search_scan_loads_only_candidate_sessions():
+    """A store's candidate set narrows which session files the scan loads."""
+    full_store = _NarrowingStore(None)
+    full_titles, full_content = _scan_with(full_store, ["zebra"])
+    narrow_store = _NarrowingStore({"/src/s1", "/src/s3"})
+    titles, content = _scan_with(narrow_store, ["zebra"])
+
+    assert sorted(narrow_store.loaded) == ["/src/s1", "/src/s3"]
+    assert narrow_store.candidate_calls == [(["zebra"], "any", ["/tmp/proj"])]
+    keep = {"s1", "s3"}
+    assert content == [h for h in full_content if h["session_id"] in keep]
+    assert titles == [h for h in full_titles if h["session_id"] in keep]
+    assert [h["session_id"] for h in content] == ["s3", "s1"]
+
+
+def test_search_scan_without_narrowing_loads_every_session():
+    """A store returning None from candidate_sessions scans everything, as before."""
+    store = _NarrowingStore(None)
+    _titles, content = _scan_with(store, ["zebra"])
+
+    assert sorted(store.loaded) == ["/src/s1", "/src/s2", "/src/s3"]
+    assert len(store.candidate_calls) == 1
+    assert sorted(h["session_id"] for h in content) == ["s1", "s2", "s3"]
+
+
+def test_search_scan_regex_does_not_ask_for_candidates():
+    """Regex terms give no filter, so the scan never asks the store to narrow."""
+    import re
+
+    store = _NarrowingStore(set())
+    _titles, content = _scan_with(store, ["zeb.a"], patterns=[re.compile("zeb.a", re.I)])
+
+    assert store.candidate_calls == []
+    assert sorted(store.loaded) == ["/src/s1", "/src/s2", "/src/s3"]
+    assert sorted(h["session_id"] for h in content) == ["s1", "s2", "s3"]
+
+
 # --- pretty ---
 
 def test_pretty_no_projects(capsys):
@@ -2562,6 +2642,10 @@ class FakeStore:
         return {path: self.project_sessions(path, limit=9999) for path in workspace_paths}
 
     def load_session_file(self, source_path: str, agent: str) -> dict | None:
+        return None
+
+    def candidate_sessions(self, terms: list[str], match: str,
+                           workspace_paths: list[str]) -> set[str] | None:
         return None
 
     def session_details(self, session_ids: list) -> dict:

@@ -222,8 +222,12 @@ def _scan_sessions(
     store = get_store()
     paths = [project.get("path", "") for project in projects]
     by_path = store.sessions_by_project(paths)
+    # Regex terms give the store nothing to filter on; plain terms may.
+    candidates = store.candidate_sessions(terms, match, paths) if patterns is None else None
     for project, path in zip(projects, paths):
         for summary in by_path.get(path, []):
+            if candidates is not None and summary.get("source_path") not in candidates:
+                continue
             summaries.append((_parse_iso(summary.get("started_at")), project, summary))
 
     summaries.sort(key=lambda item: item[0], reverse=(sort != "oldest"))
