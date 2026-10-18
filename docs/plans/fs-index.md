@@ -112,7 +112,7 @@ against `" ".join([title, *message_texts])`, at the session level:
   title, so this is a superset.
 - **Unfilterable words.** A word shorter than 3 characters gives no trigram
   filter. For `match=all`, drop it from the intersection. For `match=any`,
-  return `None`. Non-ASCII words use the `instr` scan described below.
+  return `None`. Non-ASCII words use the exact scan described below.
 - **Dirty files** (changed since the last write-back) are always in the set.
 - **Titles** are matched against `files.title`.
 - Update the protocol list in
@@ -160,13 +160,18 @@ Parity comes by construction, not by matching SQLite's semantics to Python's:
    `agent:session_id` de-duplication, and build the same result dicts.
 3. Stop at `limit`, exactly where `fs_store` stops.
 
-The trigram filter cannot be trusted in two cases. In both, skip step 1 and
-scan the stored text with `instr(lower(content), ?)`. That still avoids JSON
-parsing:
+The trigram filter cannot be trusted in three cases. In all of them, skip
+step 1 and scan the stored text with `fs_store._count_occurrences` registered
+as a SQL function (`pj_count(content, ?) > 0`). That still avoids JSON
+parsing. (`instr(lower(content), ?)` was the first idea, but SQLite's
+`lower()` folds only ASCII: `'CAFÉ'` becomes `'cafÉ'`. pj-8qn.6, 2026-10-17.)
 
 - terms shorter than 3 characters (`"go"`);
 - terms with non-ASCII characters, where SQLite case folding may differ from
-  `str.lower()` (`"café"`, `"İ"`).
+  `str.lower()` (`"café"`, `"İ"`);
+- ASCII terms ending in `i`: `"İ".lower()` is `i` plus a combining dot, so
+  `"abi"` matches `"ABİ"` in Python but not in the trigram index. İ is the
+  only code point that does this.
 
 `search_sessions` (titles) is served from `files`, with the same rules. Add a
 parity test for it next to the content tests.
