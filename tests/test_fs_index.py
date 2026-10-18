@@ -501,7 +501,7 @@ def test_plain_refresh_does_not_sample(corpus, fs_index, monkeypatch):
     assert "checked" not in result
 
 
-@pytest.mark.parametrize("column", ["title", "s_title"])
+@pytest.mark.parametrize("column", ["title", "s_title", "model"])
 def test_verify_repairs_a_tampered_session_field(corpus, fs_index, column):
     fs_index.refresh()
     path = str(sessions_home(corpus) / ".codex/sessions/2026/09/02/rollout-x1.jsonl")
@@ -734,7 +734,7 @@ def test_v1_index_falls_back_until_refresh_rebuilds_it_as_v2(corpus, fs_index, m
         columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
     finally:
         conn.close()
-    assert {"first_rowid", "last_rowid"} <= columns
+    assert {"first_rowid", "last_rowid", "model"} <= columns
     _assert_rowid_ranges_exact()
     _assert_index_is_used(fs_index, monkeypatch)
 
@@ -758,3 +758,27 @@ def test_rowid_ranges_stay_exact_across_every_write(corpus, fs_index):
     assert fs_index.refresh(verify=True)["repaired"] == 1  # verify repair
     _assert_rowid_ranges_exact()
     assert_same_as_fs(fs_index, "needle")
+
+
+def test_files_store_the_metadata_model(corpus, fs_index):
+    from pj import paths
+    path = _write(sessions_home(corpus) / ".codex/sessions/2026/09/07/rollout-x7.jsonl", [
+        {"type": "session_meta", "timestamp": "2026-09-07T00:00:00Z",
+         "payload": {"id": "x7", "cwd": "/w/gamma"}},
+        {"type": "turn_context", "timestamp": "2026-09-07T00:00:01Z",
+         "payload": {"cwd": "/w/gamma", "model": "gpt-test-1"}},
+        {"type": "response_item", "timestamp": "2026-09-07T00:00:02Z",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "model test"}]}}])
+    assert codex.parse_metadata(str(path)).model == "gpt-test-1"
+    fs_index.refresh()
+    conn = sqlite3.connect(str(paths.index_path()))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = {r["path"]: r for r in conn.execute("SELECT * FROM files")}
+    finally:
+        conn.close()
+    assert rows[str(path)]["model"] == "gpt-test-1"
+    for row_path, row in rows.items():
+        parser = codex if "/.codex/" in row_path else claude_code
+        assert fs_index._stored_metadata(row) == parser.parse_metadata(row_path), row_path

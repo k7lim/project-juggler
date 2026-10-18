@@ -35,7 +35,7 @@ CREATE TABLE files(
   path TEXT UNIQUE NOT NULL, agent TEXT NOT NULL,
   size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, list_pos INTEGER NOT NULL,
   session_id TEXT, workspace TEXT, title TEXT,
-  started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
+  started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL, model TEXT,
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
   s_started_at INTEGER, s_ended_at INTEGER,
   first_rowid INTEGER, last_rowid INTEGER);
@@ -269,10 +269,10 @@ def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
         first, last = top + 1, top + len(messages)
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
-        " session_id, workspace, title, started_at, ended_at, activity_ms,"
+        " session_id, workspace, title, started_at, ended_at, activity_ms, model,"
         " s_session_id, s_workspace, s_title, s_started_at, s_ended_at,"
         " first_rowid, last_rowid)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (path, parser.agent_slug, st.size, st.mtime_ns, pos,
          *_fresh_fields(meta, session), first, last))
     conn.executemany(
@@ -329,14 +329,14 @@ def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> d
     return {"checked": checked, "mismatched": sorted(b[1] for b in bad), "repaired": len(bad)}
 
 
-_FIELDS = ("session_id, workspace, title, started_at, ended_at, activity_ms,"
+_FIELDS = ("session_id, workspace, title, started_at, ended_at, activity_ms, model,"
            " s_session_id, s_workspace, s_title, s_started_at, s_ended_at")
 
 
 def _fresh_fields(meta, session) -> tuple:
     """The _FIELDS values _insert_file would store for this parse."""
     return (*_session_fields(meta), fs_store._activity_ms(meta) if meta else 0,
-            *_session_fields(session))
+            meta.model if meta else None, *_session_fields(session))
 
 
 def _stored_messages(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
@@ -574,7 +574,7 @@ def _stored_metadata(row):
     return base.NormalizedSession(
         session_id=row["session_id"], agent=row["agent"], source_path=row["path"],
         workspace=row["workspace"], title=row["title"],
-        started_at=row["started_at"], ended_at=row["ended_at"])
+        started_at=row["started_at"], ended_at=row["ended_at"], model=row["model"])
 
 
 def _stored_session(row, hits: dict):

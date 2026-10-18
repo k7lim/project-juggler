@@ -133,6 +133,7 @@ CREATE TABLE files(
   -- from parse_metadata (title search, sessions_by_project, ordering)
   session_id TEXT, workspace TEXT, title TEXT,
   started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
+  model TEXT,  -- list_projects(detail=True), session summaries (pj-8qn.18)
   -- from parse_session (content search results)
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
   s_started_at INTEGER, s_ended_at INTEGER,
