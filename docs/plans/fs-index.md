@@ -262,6 +262,43 @@ fails.
    lines with the baseline: `pj_ms` and scan `ms` for `cache_hit=false`.
 5. Changing the default is a separate decision.
 
+### Gate result (pj-8qn.13, host, 2026-10-17): FAIL
+
+Worth-it benchmark (`search_content`, limit 100, newest; fs then index per
+term, never in parallel). Results were identical for all 9 terms.
+
+| term | fs | index |
+|---|---|---|
+| auth | 17.7 s | 1251 ms |
+| middleware | 29.8 s | 273 ms |
+| nono | 20.8 s | 1690 ms |
+| launchd | 46.7 s | 1620 ms |
+| rate limit | 23.4 s | 1797 ms |
+| pytest | 45.3 s | 1636 ms |
+| classifier | 28.3 s | 1632 ms |
+| yolobox | 18.9 s | 2035 ms |
+| zyzzyva-absent | 62.2 s | 2387 ms |
+
+Build 90 s, index 0.74 GB, no-op refresh 0.55 s (budget 1 s: pass).
+p95 2.39 s (budget 1 s: FAIL). Median speedup about 17x (needs 20x: FAIL).
+
+Where index time goes (profiled, one search, live sessions dirty):
+- With no dirty files, a search takes 0.1 s (an absent term's MATCH takes 2 ms).
+- `_matching_messages` loads every matching message for a common term:
+  0.8 s for "auth", although the loop stops at `limit`.
+- Write-back takes 0.32 s, 0.25 s of it in `DELETE ... file_id IN`
+  (`file_id` is UNINDEXED, so the delete is a full scan of `messages`).
+- Parsing dirty files: 0.1 s and up. Live sessions grow during the 20-60 s
+  fs run, so every index search in the benchmark had a dirty set.
+
+Scoped CLI search (`pj search <t> --project project-juggler`, run one after
+the other): fs 31.1/30.7/31.2 s against index 31.2/29.4/31.4 s for pytest,
+nono and "rate limit". No gain. A profile shows about 30 s spent parsing every
+file's metadata: `discover` -> `list_projects` (15.3 s) and
+`sessions_by_project` (15.1 s). Both still delegate to fs_store, and this
+plan never moved them onto the index. Narrowing saves only session loads,
+which are a small part of the time.
+
 ## Whole path (complexity guide #11)
 
 For the CLI, search is the whole wait, so the index is the whole win. For the
