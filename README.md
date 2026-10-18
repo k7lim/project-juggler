@@ -161,6 +161,21 @@ project already holding 8765 does not block the dashboard; the chosen port is in
 the `url`/`port` fields of `start` and `status`. Pass `--port` to pin a specific
 port — a pinned port that is busy is reported as an error rather than moved.
 
+### `pj index` - Opt-in session index
+
+Build and inspect the SQLite session index used by `PJ_BACKEND=index`:
+
+```bash
+pj index refresh             # Build or update the index; JSON added/updated/removed/rebuilt/seconds
+pj index refresh --verify    # Also re-parse a sample and repair mismatches (checked/mismatched/repaired)
+pj index status              # JSON: path, exists, bytes, schema, indexed/dirty files, built_at, fts5
+pj index status --pretty     # One `key: value` line per field
+```
+
+`pj index status` only stats session files and never creates the index. Only
+`pj index refresh` builds it; searches fall back to reading session files when
+the index is missing, corrupt or outdated.
+
 ### `pj ports` - Local runtime port discovery
 
 `pj ports` reports local development servers and other runtime ports that can be

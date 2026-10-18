@@ -251,6 +251,15 @@ def build_parser() -> argparse.ArgumentParser:
     ports_p.add_argument("--project", help="Filter to project name, path, or ID prefix")
     ports_p.add_argument("--pretty", action="store_true", help="Human-readable table output")
 
+    index_p = sub.add_parser("index", help="Build or inspect the opt-in session index")
+    index_sub = index_p.add_subparsers(dest="index_action", required=True)
+    refresh_p = index_sub.add_parser("refresh", help="Bring the session index up to date")
+    refresh_p.add_argument("--verify", action="store_true",
+                           help="Also compare a sample of indexed sessions with fresh parses and repair")
+    refresh_p.add_argument("--pretty", action="store_true", help="Human-readable output")
+    istatus_p = index_sub.add_parser("status", help="Describe the session index file (no parsing)")
+    istatus_p.add_argument("--pretty", action="store_true", help="Human-readable output")
+
     census_p = sub.add_parser("census", help="Generate or serve the project census dashboard")
     census_p.add_argument(
         "census_action",
@@ -597,6 +606,24 @@ def _cmd_ports(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _cmd_index(args: argparse.Namespace) -> None:
+    from . import fs_index
+
+    try:
+        if args.index_action == "refresh":
+            env = envelope.ok(fs_index.refresh(verify=args.verify), source="index")
+        else:
+            env = envelope.ok(fs_index.status(), source="index")
+    except RuntimeError as exc:  # e.g. SQLite without FTS5
+        env = envelope.err(str(exc), source="index")
+    if args.pretty and env.get("success"):
+        pretty.print_index(env["data"])
+    else:
+        print(envelope.to_json(env))
+    if not env.get("success"):
+        sys.exit(1)
+
+
 def _cmd_annotate(action) -> None:
     start = time.monotonic()
     event = action()
@@ -651,5 +678,7 @@ def main(argv: list[str] | None = None) -> None:
         _cmd_chats(args)
     elif args.command == "ports":
         _cmd_ports(args)
+    elif args.command == "index":
+        _cmd_index(args)
     elif args.command == "census":
         _cmd_census(args)

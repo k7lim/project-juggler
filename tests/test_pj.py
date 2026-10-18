@@ -2918,3 +2918,61 @@ def test_claude_code_parse_metadata_folds_worktree_cwd(tmp_path):
     assert full is not None and full.workspace == repo
     tree = claude_code.parse_session_tree(str(path))
     assert tree is not None and tree.workspace == repo
+
+
+# --- pj index (pj-8qn.11) ---
+
+from tests.test_fs_index import corpus, home  # noqa: E402,F401  (fixtures)
+
+
+def _index_cli(capsys, *argv):
+    cli.main(["index", *argv])
+    return json.loads(capsys.readouterr().out)
+
+
+def test_cli_index_status_of_a_missing_index_is_success(home, capsys):
+    from pj import paths
+    env = _index_cli(capsys, "status")
+    assert env["success"] is True
+    assert env["data"]["exists"] is False
+    assert not paths.data_dir().exists()
+
+
+def test_cli_index_refresh_then_status_shows_files_and_no_dirty(corpus, capsys):
+    refreshed = _index_cli(capsys, "refresh")
+    assert refreshed["success"] is True and refreshed["data"]["added"] == 6
+    assert "checked" not in refreshed["data"]
+    status = _index_cli(capsys, "status")["data"]
+    assert status["exists"] is True
+    assert status["indexed_files"] == 6 and status["dirty_files"] == 0
+
+
+def test_cli_index_refresh_verify_reports_the_check(corpus, capsys):
+    data = _index_cli(capsys, "refresh", "--verify")["data"]
+    assert {"checked", "mismatched", "repaired"} <= set(data)
+
+
+def test_cli_index_status_pretty_prints_key_value_lines(home, capsys):
+    cli.main(["index", "status", "--pretty"])
+    lines = capsys.readouterr().out.splitlines()
+    assert "exists: False" in lines
+    assert any(line.startswith("path: ") for line in lines)
+
+
+def test_cli_index_refresh_error_is_an_envelope(home, capsys, monkeypatch):
+    from pj import fs_index
+    monkeypatch.setattr(fs_index, "_require_fts5",
+                        mock.Mock(side_effect=RuntimeError("pj index needs SQLite FTS5")))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["index", "refresh", "--pretty"])
+    assert exc.value.code == 1
+    env = json.loads(capsys.readouterr().out)
+    assert env["success"] is False and "FTS5" in env["meta"]["error"]
+
+
+@pytest.mark.parametrize("argv", [["index"], ["index", "status", "--verify"],
+                                  ["index", "rebuild"], ["index", "refresh", "--bogus"]])
+def test_cli_index_rejects_unknown_actions_and_flags(home, argv):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2

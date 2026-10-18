@@ -504,3 +504,9 @@ def _search_session_display(session: dict) -> str:
     if session.get("match_type") == "content" and session.get("snippet"):
         return str(session.get("snippet", "")).replace("\n", " ")[:200]
     return (session.get("title") or "(untitled)").replace("\n", " ")[:80]
+
+
+def print_index(data: dict) -> None:
+    """One `key: value` line per field of pj index refresh/status."""
+    for key, value in data.items():
+        print(f"{key}: {value}")
