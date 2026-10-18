@@ -227,3 +227,114 @@ def test_index_implements_the_whole_session_store_protocol(fs_index):
                  "session_details", "search_sessions", "search_content", "get_session",
                  "sessions_by_project", "load_session_file", "candidate_sessions"):
         assert callable(getattr(fs_index, name)), name
+
+
+# --- Write-back of the per-search dirty set (pj-8qn.7) ---
+
+def _indexed_paths():
+    import sqlite3
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        return {path for (path,) in conn.execute("SELECT path FROM files")}
+    finally:
+        conn.close()
+
+
+def test_search_writes_the_dirty_set_back(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    claude_session(corpus, "delta", "c9", 9, [("user", "fresh-needle-xyz")])
+    assert [h["session_id"] for h in fs_index.search_content("fresh-needle-xyz")] == ["c9"]
+    _forbid_parsing(monkeypatch)
+    assert [h["session_id"] for h in fs_index.search_content("fresh-needle-xyz")] == ["c9"]
+
+
+def test_search_does_not_wait_for_a_held_write_lock(corpus, fs_index):
+    import fcntl
+    import threading
+    from pj import paths
+    fs_index.refresh()
+    path = str(claude_session(corpus, "delta", "c9", 9, [("user", "fresh-needle-xyz")]))
+    fd = os.open(paths.index_path().with_suffix(".lock"), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        search = threading.Thread(target=lambda: results.append(
+            fs_index.search_content("fresh-needle-xyz")), daemon=True)
+        search.start()
+        search.join(timeout=10)
+        assert not search.is_alive(), "search waited for the write lock"
+    finally:
+        os.close(fd)
+    assert results == [fs_store.search_content("fresh-needle-xyz")]
+    assert path not in _indexed_paths()  # skipped, not queued
+
+
+def test_none_parse_during_a_search_is_never_written_back(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    path = str(claude_session(corpus, "delta", "c9", 9, [("user", "fresh-needle-xyz")]))
+    real = claude_code.parse_session
+    with monkeypatch.context() as patch:  # like the query service skipping a non-candidate
+        patch.setattr(claude_code, "parse_session",
+                      lambda p, *a, **kw: None if p == path else real(p, *a, **kw))
+        assert fs_index.search_content("fresh-needle-xyz") == []
+    assert path not in _indexed_paths()
+    assert [h["session_id"] for h in fs_index.search_content("fresh-needle-xyz")] == ["c9"]
+
+
+class _Aborted(BaseException):
+    """Like the query service's _ScanAborted."""
+
+
+def test_parse_raising_base_exception_writes_nothing_back(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    kept = str(claude_session(corpus, "delta", "c8", 8, [("user", "fresh-needle-xyz")]))
+    aborts = str(claude_session(corpus, "delta", "c9", 9, [("user", "nothing")]))
+    real = claude_code.parse_session
+
+    def parse(p, *args, **kwargs):
+        if p == aborts:
+            raise _Aborted()
+        return real(p, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(claude_code, "parse_session", parse)
+        with pytest.raises(_Aborted):
+            fs_index.search_content("fresh-needle-xyz", sort="oldest")  # parses c8 first
+    assert not {kept, aborts} & _indexed_paths()
+    assert_same_as_fs(fs_index, "fresh-needle-xyz")
+
+
+def test_write_back_rolls_back_on_base_exception(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    new = {str(claude_session(corpus, "delta", f"c{d}", d, [("user", "fresh-needle-xyz")]))
+           for d in (8, 9)}
+    real, calls = fs_index._insert_file, []
+
+    def insert(*args):
+        calls.append(args)
+        if len(calls) == 2:
+            raise _Aborted()
+        real(*args)
+    with monkeypatch.context() as patch:
+        patch.setattr(fs_index, "_insert_file", insert)
+        with pytest.raises(_Aborted):
+            fs_index.search_content("fresh-needle-xyz")
+    assert len(calls) == 2
+    assert not new & _indexed_paths()  # the first insert was rolled back too
+    assert_same_as_fs(fs_index, "fresh-needle-xyz")
+
+
+def test_write_back_keeps_files_owner_only_and_restores_the_umask(corpus, fs_index):
+    from pj import paths
+    fs_index.refresh()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{paths.index_path()}{suffix}").unlink(missing_ok=True)
+    claude_session(corpus, "delta", "c9", 9, [("user", "fresh-needle-xyz")])
+    before = os.umask(0o022)
+    try:
+        fs_index.search_content("fresh-needle-xyz")
+        assert os.umask(0o022) == 0o022
+    finally:
+        os.umask(before)
+    for created in paths.data_dir().iterdir():
+        assert stat.S_IMODE(os.stat(created).st_mode) == 0o600, created

@@ -19,6 +19,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from . import fs_store, paths
 from .parsers import base
@@ -260,23 +261,40 @@ def _indexed_rows(conn: sqlite3.Connection) -> dict:
     return {row["path"]: row for row in conn.execute("SELECT * FROM files")}
 
 
-def _listed(rows: dict):
-    """Yield (path, parser, row) in fs_store's list_sessions order.
+class _Dirty(NamedTuple):
+    """A listed file the index cannot answer for. st is None if stat failed."""
+    path: str
+    parser: object
+    pos: int
+    st: os.stat_result | None
 
-    row is the stored row when the file is unchanged, else None (dirty).
+
+def _listed(rows: dict) -> list:
+    """[(path, parser, row, dirty)] in fs_store's list_sessions order.
+
+    row is the stored row when the file is unchanged; otherwise row is None
+    and dirty holds the stat taken before any parse, for write-back.
     Deleted files are not listed, so their rows never reach a result.
     """
+    listed = []
     for root, parser in fs_store._configured_roots():
-        for path in parser.list_sessions(root):
-            yield path, parser, _clean_row(rows.get(path), parser, path)
+        for pos, path in enumerate(parser.list_sessions(root)):
+            st = _stat(path)
+            row = _clean_row(rows.get(path), parser, st)
+            dirty = None if row is not None else _Dirty(path, parser, pos, st)
+            listed.append((path, parser, row, dirty))
+    return listed
 
 
-def _clean_row(row, parser, path: str):
-    if row is None or row["agent"] != parser.agent_slug:
-        return None
+def _stat(path: str) -> os.stat_result | None:
     try:
-        st = os.stat(path)
+        return os.stat(path)
     except OSError:
+        return None
+
+
+def _clean_row(row, parser, st: os.stat_result | None):
+    if row is None or st is None or row["agent"] != parser.agent_slug:
         return None
     if (st.st_size, st.st_mtime_ns) != (row["size"], row["mtime_ns"]):
         return None
@@ -284,26 +302,96 @@ def _clean_row(row, parser, path: str):
 
 
 def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
-    rows = _indexed_rows(conn)
+    listed = _listed(_indexed_rows(conn))
     hits = _matching_messages(conn, query)
+    parsed: dict = {}
     candidates = []
-    for path, parser, row in _listed(rows):
+    for path, parser, row, dirty in listed:
         if row is None:
             meta = parser.parse_metadata(path)
             candidates.append((fs_store._activity_ms(meta) if meta else 0,
-                               functools.partial(parser.parse_session, path)))
+                               functools.partial(_parse_and_keep, dirty, meta, parsed)))
         else:
             candidates.append((row["activity_ms"],
                                functools.partial(_stored_session, row, hits)))
-    return fs_store.search_candidates(candidates, query, limit=limit, sort=sort)
+    results = fs_store.search_candidates(candidates, query, limit=limit, sort=sort)
+    # Reached only when the search finished: a parse that raised (even a
+    # BaseException) skips write-back entirely.
+    _write_back(list(parsed.values()))
+    return results
+
+
+def _parse_and_keep(dirty: _Dirty, meta, parsed: dict):
+    """parse_session for a dirty file; keep the result for write-back.
+
+    A None result is never kept: inside the pj query service a guarded
+    parse returns None for files it skipped, and storing that would make
+    the index trust an empty session. Such files stay dirty.
+    """
+    session = dirty.parser.parse_session(dirty.path)
+    if session is not None and dirty.st is not None:
+        parsed.setdefault(dirty.path, (dirty, meta, session))  # one row per path
+    return session
 
 
 def _search_sessions(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
     """Titles come from files.title; fs_store's own loop decides the matches."""
-    rows = _indexed_rows(conn)
     metas = (parser.parse_metadata(path) if row is None else _stored_metadata(row)
-             for path, parser, row in _listed(rows))
+             for path, parser, row, _ in _listed(_indexed_rows(conn)))
     return fs_store.search_titles(metas, query, limit=limit, sort=sort)
+
+
+# --- Write-back: an optimization only; correctness never depends on it ---
+
+def _write_back(parsed: list) -> None:
+    """Store (dirty, meta, session) results in one transaction if the lock is free."""
+    if not parsed:
+        return
+    old_umask = os.umask(0o077)  # anything created here stays owner-only
+    try:
+        with _try_write_lock(paths.index_path().with_suffix(".lock")) as locked:
+            if locked:
+                _write_back_locked(paths.index_path(), parsed)
+    except (OSError, sqlite3.Error):
+        pass  # the next search or refresh() will do it
+    finally:
+        os.umask(old_umask)
+
+
+@contextmanager
+def _try_write_lock(lock_path: Path):
+    """Yield True holding the exclusive flock, or False at once if it is taken."""
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        os.close(fd)
+
+
+def _write_back_locked(index: Path, parsed: list) -> None:
+    # A fresh connection: the search's may point at an index refresh() replaced.
+    conn = _open_current(index)
+    if conn is None:
+        return
+    try:
+        with conn:  # commits, or rolls back on any exception, BaseException included
+            _replace_files(conn, parsed)
+    finally:
+        conn.close()
+
+
+def _replace_files(conn: sqlite3.Connection, parsed: list) -> None:
+    marks = ",".join("?" * len(parsed))
+    old_ids = [file_id for (file_id,) in conn.execute(
+        f"SELECT id FROM files WHERE path IN ({marks})", [d.path for d, _, _ in parsed])]
+    _delete_files(conn, old_ids)
+    for dirty, meta, session in parsed:
+        _insert_file(conn, dirty.path, dirty.parser, dirty.pos, dirty.st, meta, session)
 
 
 def _stored_metadata(row):
