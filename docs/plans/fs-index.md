@@ -129,9 +129,13 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE files(
   id INTEGER PRIMARY KEY,
   path TEXT UNIQUE NOT NULL, agent TEXT NOT NULL,
-  size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+  size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, list_pos INTEGER NOT NULL,
+  -- from parse_metadata (title search, sessions_by_project, ordering)
   session_id TEXT, workspace TEXT, title TEXT,
-  started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL);
+  started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
+  -- from parse_session (content search results)
+  s_session_id TEXT, s_workspace TEXT, s_title TEXT,
+  s_started_at INTEGER, s_ended_at INTEGER);
 CREATE VIRTUAL TABLE messages USING fts5(
   content, role UNINDEXED, file_id UNINDEXED, ord UNINDEXED,
   tokenize = 'trigram');
@@ -139,14 +143,21 @@ CREATE VIRTUAL TABLE messages USING fts5(
 
 A `schema_version` other than the code's constant counts as a missing index.
 
+The two column groups are separate because `parse_metadata` (head and tail
+lines) and `parse_session` (whole file) disagree on title, workspace and
+timestamps; fs_store uses each for different searches. Found in ticket QA,
+2026-10-17.
+
 ### Search: index narrows, Python decides
 
 Parity comes by construction, not by matching SQLite's semantics to Python's:
 
 1. FTS5 `MATCH` on the term gives candidate files (a superset).
-2. For each candidate, in `fs_store`'s order (`activity_ms`, then path), run
-   `fs_store`'s own `_count_occurrences` / `_extract_snippet` over the stored
-   message text, and build the same result dicts.
+2. For each candidate, in `fs_store`'s order (a stable sort by `activity_ms`
+   over the `list_sessions` enumeration order; ties are common, so never
+   break them by path), run `fs_store`'s own `_count_occurrences` /
+   `_extract_snippet` over the stored message text, with the same
+   `agent:session_id` de-duplication, and build the same result dicts.
 3. Stop at `limit`, exactly where `fs_store` stops.
 
 The trigram filter cannot be trusted in two cases. In both, skip step 1 and
@@ -171,6 +182,10 @@ On every search:
    from deleted files are dropped.
 4. If the write lock is free, write the dirty set back in one transaction.
    This is only an optimization: correctness never depends on winning the lock.
+   A file whose parse returned `None` during a search stays dirty and is never
+   written back: inside the query service, `_guard_parse` returns `None` for
+   files that are not rg candidates, and storing that would make the index
+   trust an empty session. Any exception rolls the transaction back.
 
 Appended sessions are re-indexed whole. That costs one file parse, the same as
 `fs_store` pays for that file today.
