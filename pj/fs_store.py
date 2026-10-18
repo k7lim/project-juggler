@@ -8,6 +8,7 @@ Additional roots can be added via PJ_SOURCES env var.
 """
 from __future__ import annotations
 
+import functools
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -259,24 +260,33 @@ def session_details(session_ids: list) -> dict:
 
 def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search session titles for substring matches."""
+    metas = (parser.parse_metadata(path)
+             for root, parser in _configured_roots()
+             for path in parser.list_sessions(root))
+    return search_titles(metas, query, limit=limit, sort=sort)
+
+
+def search_titles(metas, query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
+    """search_sessions over metadata (NormalizedSession or None) in list_sessions order.
+
+    fs_index feeds this stored rows, so both backends share the matching.
+    """
     query_lower = query.lower()
     results = []
-    for root, parser in _configured_roots():
-        for path in parser.list_sessions(root):
-            meta = parser.parse_metadata(path)
-            if not meta or not meta.title:
-                continue
-            if query_lower in meta.title.lower():
-                iso = _iso_from_ms(meta.started_at) if meta.started_at else None
-                ended_iso = _iso_from_ms(meta.ended_at) if meta.ended_at else None
-                results.append({
-                    "session_id": meta.session_id,
-                    "path": meta.workspace or "",
-                    "agent": meta.agent,
-                    "title": meta.title,
-                    "started_at": iso,
-                    "ended_at": ended_iso,
-                })
+    for meta in metas:
+        if not meta or not meta.title:
+            continue
+        if query_lower in meta.title.lower():
+            iso = _iso_from_ms(meta.started_at) if meta.started_at else None
+            ended_iso = _iso_from_ms(meta.ended_at) if meta.ended_at else None
+            results.append({
+                "session_id": meta.session_id,
+                "path": meta.workspace or "",
+                "agent": meta.agent,
+                "title": meta.title,
+                "started_at": iso,
+                "ended_at": ended_iso,
+            })
 
     if sort == "oldest":
         results.sort(key=lambda r: r.get("ended_at") or r.get("started_at") or "")
@@ -295,19 +305,29 @@ def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[d
 
 def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
     """Search message content via substring match (no index)."""
-    results: list[dict] = []
-    seen_sessions: set[str] = set()
-    candidates: list[tuple[int, str, object]] = []
-
+    candidates = []
     for root, parser in _configured_roots():
         for path in parser.list_sessions(root):
             meta = parser.parse_metadata(path)
-            candidates.append((_activity_ms(meta) if meta else 0, path, parser))
+            candidates.append((_activity_ms(meta) if meta else 0,
+                               functools.partial(parser.parse_session, path)))
+    return search_candidates(candidates, query, limit=limit, sort=sort)
 
-    candidates.sort(key=lambda c: c[0], reverse=(sort != "oldest"))
 
-    for _, path, parser in candidates:
-        session = parser.parse_session(path)
+def search_candidates(candidates, query: str, limit: int = 20,
+                      sort: str = "newest") -> list[dict]:
+    """search_content over (activity_ms, load_session) pairs in list_sessions order.
+
+    load_session() returns a NormalizedSession or None. fs_index feeds this
+    stored rows, so both backends share the matching, de-dup and limit.
+    """
+    results: list[dict] = []
+    seen_sessions: set[str] = set()
+
+    candidates = sorted(candidates, key=lambda c: c[0], reverse=(sort != "oldest"))
+
+    for _, load_session in candidates:
+        session = load_session()
         if not session:
             continue
 
