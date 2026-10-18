@@ -4,19 +4,24 @@ Implements the SessionStore protocol (session_store.py). It must give the
 same results as fs_store, and fs_store results whenever the index cannot
 answer. See docs/plans/fs-index.md.
 
-refresh() builds the index file; searches still delegate to fs_store.
+refresh() builds the index file. search_content answers unchanged files
+from it and parses only the dirty set (new or changed files); the other
+calls still delegate to fs_store.
 """
 from __future__ import annotations
 
 import fcntl
+import functools
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import fs_store, paths
+from .parsers import base
 
 SCHEMA_VERSION = "1"
 
@@ -214,6 +219,123 @@ def _session_fields(session) -> tuple:
             session.started_at, session.ended_at)
 
 
+# --- Index search ---
+# Parity by construction: fs_store's own loops (search_candidates) run over
+# stored rows for unchanged files and over a fresh parse for dirty ones.
+
+_warned = False  # the fallback warning is printed once per process
+
+
+def _with_index(search, fallback):
+    """search(conn) on the index; fallback() when the index cannot answer."""
+    index = paths.index_path()
+    if not index.exists():
+        return _fall_back(fallback, "no index file; run fs_index.refresh()")
+    try:
+        conn = sqlite3.connect(str(index))
+        try:
+            return search(conn)
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:  # corrupt file, missing FTS5, ...
+        return _fall_back(fallback, str(exc))
+
+
+def _fall_back(fallback, reason: str):
+    global _warned
+    if not _warned:
+        _warned = True
+        print(f"pj: session index unavailable ({reason}); reading session files",
+              file=sys.stderr)
+    return fallback()
+
+
+def _indexed_rows(conn: sqlite3.Connection) -> dict:
+    conn.row_factory = sqlite3.Row
+    return {row["path"]: row for row in conn.execute("SELECT * FROM files")}
+
+
+def _listed(rows: dict):
+    """Yield (path, parser, row) in fs_store's list_sessions order.
+
+    row is the stored row when the file is unchanged, else None (dirty).
+    Deleted files are not listed, so their rows never reach a result.
+    """
+    for root, parser in fs_store._configured_roots():
+        for path in parser.list_sessions(root):
+            yield path, parser, _clean_row(rows.get(path), parser, path)
+
+
+def _clean_row(row, parser, path: str):
+    if row is None or row["agent"] != parser.agent_slug:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if (st.st_size, st.st_mtime_ns) != (row["size"], row["mtime_ns"]):
+        return None
+    return row
+
+
+def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
+    rows = _indexed_rows(conn)
+    hits = _matching_messages(conn, query)
+    candidates = []
+    for path, parser, row in _listed(rows):
+        if row is None:
+            meta = parser.parse_metadata(path)
+            candidates.append((fs_store._activity_ms(meta) if meta else 0,
+                               functools.partial(parser.parse_session, path)))
+        else:
+            candidates.append((row["activity_ms"],
+                               functools.partial(_stored_session, row, hits)))
+    return fs_store.search_candidates(candidates, query, limit=limit, sort=sort)
+
+
+def _stored_session(row, hits: dict):
+    """The stored session with only its candidate messages, or None if none match.
+
+    Messages that cannot match count 0 in fs_store's loop, so leaving them
+    out changes nothing; fs_store's own matching rechecks the rest.
+    """
+    messages = hits.get(row["id"])
+    if not messages:
+        return None
+    return base.NormalizedSession(
+        session_id=row["s_session_id"], agent=row["agent"], source_path=row["path"],
+        workspace=row["s_workspace"], title=row["s_title"],
+        started_at=row["s_started_at"], ended_at=row["s_ended_at"], messages=messages)
+
+
+def _matching_messages(conn: sqlite3.Connection, query: str) -> dict:
+    """{file_id: [NormalizedMessage in order]}: a superset of the messages that match."""
+    if _trigram_safe(query):
+        sql = "SELECT file_id, ord, role, content FROM messages WHERE messages MATCH ?"
+        arg = '"' + query.replace('"', '""') + '"'
+    else:
+        conn.create_function("pj_count", 2, fs_store._count_occurrences, deterministic=True)
+        sql = "SELECT file_id, ord, role, content FROM messages WHERE pj_count(content, ?) > 0"
+        arg = query
+    hits: dict = {}
+    for file_id, ord_, role, content in conn.execute(sql, (arg,)):
+        hits.setdefault(file_id, []).append(base.NormalizedMessage(idx=ord_, role=role, content=content))
+    for messages in hits.values():
+        messages.sort(key=lambda m: m.idx)
+    return hits
+
+
+def _trigram_safe(query: str) -> bool:
+    """True when FTS5 trigram MATCH finds every message str.lower() matching finds.
+
+    Not for terms under 3 characters (no trigram) or non-ASCII terms (SQLite
+    folds case differently). One ASCII gap remains: "İ".lower() is "i" plus a
+    combining dot, which SQLite does not fold, so "abi" matches "ABİ" only in
+    Python. ASCII terms ending in "i" therefore take the exact path too.
+    """
+    return len(query) >= 3 and query.isascii() and not query.lower().endswith("i")
+
+
 # --- SessionStore interface ---
 
 def available() -> bool:
@@ -245,7 +367,9 @@ def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[d
 
 
 def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
-    return fs_store.search_content(query, limit=limit, sort=sort)
+    return _with_index(
+        lambda conn: _search_content(conn, query, limit, sort),
+        lambda: fs_store.search_content(query, limit=limit, sort=sort))
 
 
 def get_session(

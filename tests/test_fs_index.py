@@ -162,11 +162,33 @@ def test_missing_index_falls_back_to_fs_results(corpus, fs_index):
     assert_same_as_fs(fs_index, "needle")
 
 
-def test_corrupt_index_falls_back_to_fs_results(corpus, fs_index):
+def test_corrupt_index_falls_back_to_fs_results(corpus, fs_index, monkeypatch, capsys):
     from pj import paths
+    monkeypatch.setattr(fs_index, "_warned", False)
     fs_index.refresh()
     paths.index_path().write_bytes(b"not a database")
     assert_same_as_fs(fs_index, "needle")
+    assert_same_as_fs(fs_index, "alpha")
+    assert capsys.readouterr().err.count("session index unavailable") == 1  # once per process
+
+
+def _forbid_parsing(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("an unchanged file was parsed")
+    for parser in (claude_code, codex, kimi):
+        monkeypatch.setattr(parser, "parse_session", boom)
+        monkeypatch.setattr(parser, "parse_metadata", boom)
+    monkeypatch.setattr(claude_code, "parse_session_tree", boom)
+
+
+@pytest.mark.parametrize("sort", ["newest", "oldest", "relevance"])
+def test_index_is_used(corpus, fs_index, monkeypatch, sort):
+    """After refresh() no file is dirty, so searches must not parse at all."""
+    expected = {q: fs_store.search_content(q, sort=sort) for q in QUERIES}
+    fs_index.refresh()
+    _forbid_parsing(monkeypatch)
+    for query in QUERIES:
+        assert fs_index.search_content(query, sort=sort) == expected[query], query
 
 
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
