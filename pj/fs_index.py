@@ -6,7 +6,8 @@ answer. See docs/plans/fs-index.md.
 
 refresh() builds the index file. search_content and search_sessions answer
 unchanged files from it and parse only the dirty set (new or changed
-files); the other calls still delegate to fs_store.
+files); candidate_sessions narrows search's scan path from it. The other
+calls still delegate to fs_store.
 """
 from __future__ import annotations
 
@@ -523,19 +524,22 @@ def _stored_session(row, hits: dict):
 
 def _matching_messages(conn: sqlite3.Connection, query: str) -> dict:
     """{file_id: [NormalizedMessage in order]}: a superset of the messages that match."""
-    if _trigram_safe(query):
-        sql = "SELECT file_id, ord, role, content FROM messages WHERE messages MATCH ?"
-        arg = '"' + query.replace('"', '""') + '"'
-    else:
-        conn.create_function("pj_count", 2, fs_store._count_occurrences, deterministic=True)
-        sql = "SELECT file_id, ord, role, content FROM messages WHERE pj_count(content, ?) > 0"
-        arg = query
+    where, arg = _match_clause(conn, query)
     hits: dict = {}
-    for file_id, ord_, role, content in conn.execute(sql, (arg,)):
+    for file_id, ord_, role, content in conn.execute(
+            f"SELECT file_id, ord, role, content FROM messages WHERE {where}", (arg,)):
         hits.setdefault(file_id, []).append(base.NormalizedMessage(idx=ord_, role=role, content=content))
     for messages in hits.values():
         messages.sort(key=lambda m: m.idx)
     return hits
+
+
+def _match_clause(conn: sqlite3.Connection, query: str) -> tuple[str, str]:
+    """(WHERE clause, its argument) selecting a superset of the messages matching query."""
+    if _trigram_safe(query):
+        return "messages MATCH ?", '"' + query.replace('"', '""') + '"'
+    conn.create_function("pj_count", 2, fs_store._count_occurrences, deterministic=True)
+    return "pj_count(content, ?) > 0", query
 
 
 def _trigram_safe(query: str) -> bool:
@@ -547,6 +551,52 @@ def _trigram_safe(query: str) -> bool:
     Python. ASCII terms ending in "i" therefore take the exact path too.
     """
     return len(query) >= 3 and query.isascii() and not query.lower().endswith("i")
+
+
+# --- Narrowing the scan path ---
+# search._scan_sessions matches a whole session: " ".join([title, *messages]).
+# The candidate set must be a superset of those matches.
+
+MIN_FILTER_WORD = 3  # shorter words give no trigram filter
+
+
+def _term_filters(terms: list[str], match: str) -> list[list[str]] | None:
+    """Per term, the words to filter by; None when narrowing is impossible.
+
+    A phrase can span the joining space, so it is filtered by each word
+    (each word lies inside the title or one message). A term whose words
+    are all short gives no filter: dropped for match="all", fatal for "any".
+    """
+    filters = [[w for w in term.split() if len(w) >= MIN_FILTER_WORD] for term in terms]
+    usable = [f for f in filters if f]
+    if not usable or (match != "all" and len(usable) < len(filters)):
+        return None
+    return usable
+
+
+def _candidate_sessions(conn: sqlite3.Connection, filters: list[list[str]], match: str,
+                        workspaces: set[str]) -> set[str]:
+    listed = _listed(_indexed_rows(conn))
+    _check_dirty_bound(listed)
+    rows = {row["id"]: row for _, _, row, _ in listed
+            if row is not None and row["workspace"] in workspaces}
+    sets = [_term_candidates(conn, rows, words) for words in filters]
+    found = set.intersection(*sets) if match == "all" else set.union(*sets)
+    return found | {path for path, _, row, _ in listed if row is None}  # dirty: always
+
+
+def _term_candidates(conn: sqlite3.Connection, rows: dict, words: list[str]) -> set[str]:
+    """Paths of rows where each word is in the title or in some message."""
+    return set.intersection(*(_word_candidates(conn, rows, w) for w in words))
+
+
+def _word_candidates(conn: sqlite3.Connection, rows: dict, word: str) -> set[str]:
+    where, arg = _match_clause(conn, word)
+    ids = {file_id for (file_id,) in conn.execute(
+        f"SELECT DISTINCT file_id FROM messages WHERE {where}", (arg,))}
+    lowered = word.lower()
+    return {row["path"] for file_id, row in rows.items()
+            if file_id in ids or lowered in (row["title"] or "").lower()}
 
 
 # --- SessionStore interface ---
@@ -604,4 +654,10 @@ def load_session_file(source_path: str, agent: str) -> dict | None:
 
 def candidate_sessions(terms: list[str], match: str,
                        workspace_paths: list[str]) -> set[str] | None:
-    return fs_store.candidate_sessions(terms, match, workspace_paths)
+    """Source paths in these workspaces that may match; None means scan them all."""
+    filters = _term_filters(terms, match)
+    if filters is None:
+        return None
+    return _with_index(
+        lambda conn: _candidate_sessions(conn, filters, match, set(workspace_paths)),
+        lambda: None)

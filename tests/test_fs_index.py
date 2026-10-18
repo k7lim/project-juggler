@@ -442,3 +442,129 @@ def test_verify_repairs_a_tampered_session_field(corpus, fs_index, column):
     assert fs_index.refresh(verify=True)["mismatched"] == [path]
     assert fs_index.refresh(verify=True)["mismatched"] == []
     assert fs_index.search_sessions("needle") == fs_store.search_sessions("needle")
+
+
+# --- Narrowing the scan path: candidate_sessions (pj-8qn.10) ---
+
+def _ids(results):
+    return sorted(s["session_id"] for p in results for s in p.get("matching_sessions", []))
+
+
+def _search_with(store, monkeypatch, *args, **kwargs):
+    from pj import search
+    monkeypatch.setattr(session_store, "_store", store)
+    return search.search(*args, **kwargs)
+
+
+@pytest.mark.parametrize("query, kwargs", [
+    ("needle", {"project": "alpha"}),
+    ("café", {"project": "beta"}),
+    (["beta", "alpha"], {"match": "all"}),
+    ("with alpha", {"project": "span"}),   # only across two messages of s1
+])
+def test_scan_search_matches_fs_store_with_narrowing(corpus, fs_index, monkeypatch, query, kwargs):
+    claude_session(corpus, "span", "s1", 7, [("user", "ends with"), ("assistant", "alpha x")])
+    fs_index.refresh()
+    expected = _search_with(fs_store, monkeypatch, query, **kwargs)
+    assert expected, "a parity test on empty results proves nothing"
+    terms = query if isinstance(query, list) else [query]
+    workspaces = ["/w/alpha", "/w/beta", "/w/gamma", "/w/span"]
+    assert fs_index.candidate_sessions(terms, kwargs.get("match", "any"), workspaces) is not None
+    assert _search_with(fs_index, monkeypatch, query, **kwargs) == expected
+
+
+def test_fixture_match_all_scan_finds_x3_and_c3(corpus, monkeypatch):
+    results = _search_with(fs_store, monkeypatch, ["beta", "alpha"], match="all")
+    assert set(_ids(results)) == {"x3", "c3"}
+
+
+def _path(home, rel):
+    return str(sessions_home(home) / rel)
+
+
+C1 = ".claude/projects/-w-alpha/c1.jsonl"
+C2 = ".claude/projects/-w-alpha/c2.jsonl"
+X1 = ".codex/sessions/2026/09/02/rollout-x1.jsonl"
+ALL_WS = ["/w/alpha", "/w/beta", "/w/gamma"]
+
+
+def test_candidates_are_per_workspace_and_per_session(corpus, fs_index):
+    fs_index.refresh()
+    assert fs_index.candidate_sessions(["needle"], "any", ["/w/alpha"]) == {_path(corpus, C1)}
+    assert fs_index.candidate_sessions(["needle"], "any", ALL_WS) == {
+        _path(corpus, C1), _path(corpus, X1)}
+    # x3 has "alpha" and "beta" in different messages; c2 has only "alpha"
+    assert fs_index.candidate_sessions(["beta", "alpha"], "all", ALL_WS) == {
+        _path(corpus, ".claude/projects/-w-beta/c3.jsonl"),
+        _path(corpus, ".codex/sessions/2026/09/06/rollout-x3.jsonl")}
+
+
+def test_short_word_gives_no_narrowing_for_any_and_is_dropped_for_all(corpus, fs_index):
+    fs_index.refresh()
+    assert fs_index.candidate_sessions(["go"], "any", ALL_WS) is None
+    assert fs_index.candidate_sessions(["needle", "go"], "any", ALL_WS) is None
+    assert (fs_index.candidate_sessions(["needle", "go"], "all", ALL_WS)
+            == fs_index.candidate_sessions(["needle"], "all", ALL_WS))
+    assert fs_index.candidate_sessions(["go", "ab"], "all", ALL_WS) is None
+
+
+def test_phrase_is_filtered_by_each_word(corpus, fs_index):
+    claude_session(corpus, "span", "s1", 7, [("user", "ends with"), ("assistant", "alpha x")])
+    fs_index.refresh()
+    s1 = _path(corpus, ".claude/projects/-w-span/s1.jsonl")
+    assert s1 in fs_index.candidate_sessions(["with alpha"], "any", ["/w/span"])
+
+
+def test_non_trigram_words_use_the_exact_scan(corpus, fs_index):
+    dotted = str(claude_session(corpus, "delta", "c9", 9, [("user", "hello"), ("assistant", "XYZABİ")]))
+    fs_index.refresh()
+    assert "zabi" in "XYZABİ".lower()  # İ lowers to i + U+0307; trigram MATCH misses it
+    assert fs_index.candidate_sessions(["zabi"], "any", ["/w/delta"]) == {dotted}
+    c3 = _path(corpus, ".claude/projects/-w-beta/c3.jsonl")
+    assert fs_index.candidate_sessions(["CAFÉ"], "any", ALL_WS) == {c3}
+
+
+def test_workspace_filter_uses_the_metadata_workspace(corpus, fs_index):
+    fs_index.refresh()
+    _tamper("UPDATE files SET s_workspace = '/w/elsewhere' WHERE path = ?", _path(corpus, C1))
+    assert fs_index.candidate_sessions(["needle"], "any", ["/w/alpha"]) == {_path(corpus, C1)}
+
+
+def test_title_is_matched_against_the_stored_title(corpus, fs_index):
+    fs_index.refresh()
+    _tamper("UPDATE files SET title = 'zebra crossing' WHERE path = ?", _path(corpus, C1))
+    assert fs_index.candidate_sessions(["zebra"], "any", ["/w/alpha"]) == {_path(corpus, C1)}
+
+
+def test_dirty_file_is_always_a_candidate(corpus, fs_index):
+    fs_index.refresh()
+    new = str(claude_session(corpus, "delta", "c9", 9, [("user", "nothing relevant")]))
+    assert new in fs_index.candidate_sessions(["needle"], "any", ["/w/alpha"])
+
+
+def test_unusable_index_gives_no_narrowing(corpus, fs_index, monkeypatch):
+    from pj import paths
+    monkeypatch.setattr(fs_index, "_warned", True)  # keep stderr quiet
+    assert fs_index.candidate_sessions(["needle"], "any", ALL_WS) is None  # missing
+    fs_index.refresh()
+    paths.index_path().write_bytes(b"not a database")
+    assert fs_index.candidate_sessions(["needle"], "any", ALL_WS) is None  # corrupt
+
+
+def test_too_stale_index_gives_no_narrowing(corpus, fs_index, monkeypatch):
+    monkeypatch.setattr(fs_index, "_warned", True)
+    monkeypatch.setattr(fs_index, "MAX_DIRTY_FILES", 0)
+    fs_index.refresh()
+    claude_session(corpus, "delta", "c9", 9, [("user", "nothing relevant")])
+    assert fs_index.candidate_sessions(["needle"], "any", ALL_WS) is None
+
+
+def test_scoped_search_loads_only_candidate_sessions(corpus, fs_index, monkeypatch):
+    expected = _search_with(fs_store, monkeypatch, "needle", project="alpha")
+    fs_index.refresh()
+    loaded = []
+    real = fs_index.load_session_file
+    monkeypatch.setattr(fs_index, "load_session_file",
+                        lambda path, agent: loaded.append(path) or real(path, agent))
+    assert _search_with(fs_index, monkeypatch, "needle", project="alpha") == expected
+    assert loaded == [_path(corpus, C1)]  # c2 is in alpha too, but has no "needle"
