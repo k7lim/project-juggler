@@ -135,13 +135,22 @@ CREATE TABLE files(
   started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
   -- from parse_session (content search results)
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
-  s_started_at INTEGER, s_ended_at INTEGER);
+  s_started_at INTEGER, s_ended_at INTEGER,
+  -- this file's messages rowids (NULL when it has none); see below
+  first_rowid INTEGER, last_rowid INTEGER);
 CREATE VIRTUAL TABLE messages USING fts5(
   content, role UNINDEXED, file_id UNINDEXED, ord UNINDEXED,
   tokenize = 'trigram');
 ```
 
 A `schema_version` other than the code's constant counts as a missing index.
+
+Schema v2 (pj-8qn.18). `file_id` is UNINDEXED, so `WHERE file_id IN (...)`
+scans all of `messages`. Each file's messages are inserted with consecutive
+explicit rowids above the current maximum, and `files` records the range.
+Only the write-lock holder inserts, in one transaction, so a range cannot
+interleave. Deletes and the verify read use `rowid BETWEEN first_rowid AND
+last_rowid`. Search still maps MATCH hits to files through `file_id`.
 
 The two column groups are separate because `parse_metadata` (head and tail
 lines) and `parse_session` (whole file) disagree on title, workspace and

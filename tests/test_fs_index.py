@@ -635,3 +635,126 @@ def test_scoped_search_loads_only_candidate_sessions(corpus, fs_index, monkeypat
                         lambda path, agent: loaded.append(path) or real(path, agent))
     assert _search_with(fs_index, monkeypatch, "needle", project="alpha") == expected
     assert loaded == [_path(corpus, C1)]  # c2 is in alpha too, but has no "needle"
+
+
+# --- Schema v2: messages addressed by rowid range (pj-8qn.18) ---
+
+_V1_SCHEMA = """
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE files(
+  id INTEGER PRIMARY KEY,
+  path TEXT UNIQUE NOT NULL, agent TEXT NOT NULL,
+  size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, list_pos INTEGER NOT NULL,
+  session_id TEXT, workspace TEXT, title TEXT,
+  started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
+  s_session_id TEXT, s_workspace TEXT, s_title TEXT,
+  s_started_at INTEGER, s_ended_at INTEGER);
+CREATE VIRTUAL TABLE messages USING fts5(
+  content, role UNINDEXED, file_id UNINDEXED, ord UNINDEXED,
+  tokenize = 'trigram');
+INSERT INTO meta VALUES ('schema_version', '1');
+"""
+
+
+def _append_claude(home, rel, session_id, text):
+    path = sessions_home(home) / rel
+    with path.open("a") as f:
+        f.write(json.dumps({"type": "user", "sessionId": session_id, "cwd": "/w/alpha",
+                            "timestamp": "2026-09-01T00:01:00Z",
+                            "message": {"role": "user", "content": text}}) + "\n")
+    return str(path)
+
+
+def _assert_rowid_ranges_exact():
+    """Every file's messages are exactly the rowids first_rowid..last_rowid."""
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        by_file: dict = {}
+        for rowid, file_id in conn.execute("SELECT rowid, file_id FROM messages"):
+            by_file.setdefault(file_id, []).append(rowid)
+        files = conn.execute("SELECT id, first_rowid, last_rowid FROM files").fetchall()
+    finally:
+        conn.close()
+    assert set(by_file) <= {file_id for file_id, _, _ in files}  # no orphans
+    for file_id, first, last in files:
+        expected = [] if first is None else list(range(first, last + 1))
+        assert sorted(by_file.get(file_id, [])) == expected, file_id
+
+
+def _trace_sql(monkeypatch):
+    """Collect every statement fs_index runs from now on."""
+    statements, real = [], sqlite3.connect
+
+    def connect(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return statements
+
+
+def _assert_messages_deleted_by_range(statements):
+    deletes = [s for s in statements if s.lstrip().upper().startswith("DELETE FROM MESSAGES")]
+    assert deletes, statements
+    assert all("rowid BETWEEN" in s for s in deletes), deletes
+    assert not [s for s in statements if "file_id IN" in s or "file_id =" in s]
+
+
+def test_refresh_and_write_back_delete_messages_by_rowid_range(corpus, fs_index, monkeypatch):
+    fs_index.refresh()
+    _append_claude(corpus, ".claude/projects/-w-alpha/c1.jsonl", "c1", "appended-term-qq")
+    (sessions_home(corpus) / ".claude/projects/-w-alpha/c2.jsonl").unlink()
+    with monkeypatch.context() as patch:
+        statements = _trace_sql(patch)
+        assert fs_index.refresh()["updated"] == 1
+    _assert_messages_deleted_by_range(statements)
+
+    _append_claude(corpus, ".claude/projects/-w-alpha/c1.jsonl", "c1", "second-term-qq")
+    with monkeypatch.context() as patch:
+        statements = _trace_sql(patch)
+        assert_same_as_fs(fs_index, "second-term-qq")  # writes c1 back
+    _assert_messages_deleted_by_range(statements)
+    _assert_index_is_used(fs_index, monkeypatch)
+
+
+def test_v1_index_falls_back_until_refresh_rebuilds_it_as_v2(corpus, fs_index, monkeypatch, capsys):
+    from pj import paths
+    monkeypatch.setattr(fs_index, "_warned", False)
+    paths.index_path().parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(paths.index_path()))
+    conn.executescript(_V1_SCHEMA)
+    conn.close()
+    assert_same_as_fs(fs_index, "needle")
+    assert capsys.readouterr().err.count("session index unavailable") == 1
+    assert fs_index.refresh()["rebuilt"] is True
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("2",)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+    finally:
+        conn.close()
+    assert {"first_rowid", "last_rowid"} <= columns
+    _assert_rowid_ranges_exact()
+    _assert_index_is_used(fs_index, monkeypatch)
+
+
+def test_rowid_ranges_stay_exact_across_every_write(corpus, fs_index):
+    fs_index.refresh()  # add
+    _assert_rowid_ranges_exact()
+    _append_claude(corpus, ".claude/projects/-w-alpha/c1.jsonl", "c1", "appended-term-qq")
+    assert fs_index.refresh()["updated"] == 1  # update
+    _assert_rowid_ranges_exact()
+    (sessions_home(corpus) / ".claude/projects/-w-alpha/c2.jsonl").unlink()
+    assert fs_index.refresh()["removed"] == 1  # delete
+    _assert_rowid_ranges_exact()
+    _append_claude(corpus, ".claude/projects/-w-alpha/c1.jsonl", "c1", "second-term-qq")
+    claude_session(corpus, "delta", "c9", 9, [("user", "second-term-qq"), ("assistant", "ok")])
+    assert_same_as_fs(fs_index, "second-term-qq")  # write-back of an update and an add
+    _assert_rowid_ranges_exact()
+    path = str(sessions_home(corpus) / ".codex/sessions/2026/09/02/rollout-x1.jsonl")
+    _tamper("UPDATE messages SET content = 'tampered' WHERE ord = 0 AND file_id ="
+            " (SELECT id FROM files WHERE path = ?)", path)
+    assert fs_index.refresh(verify=True)["repaired"] == 1  # verify repair
+    _assert_rowid_ranges_exact()
+    assert_same_as_fs(fs_index, "needle")

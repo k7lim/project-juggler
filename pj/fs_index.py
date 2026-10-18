@@ -26,7 +26,7 @@ from typing import NamedTuple
 from . import fs_store, paths
 from .parsers import base
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -37,7 +37,8 @@ CREATE TABLE files(
   session_id TEXT, workspace TEXT, title TEXT,
   started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL,
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
-  s_started_at INTEGER, s_ended_at INTEGER);
+  s_started_at INTEGER, s_ended_at INTEGER,
+  first_rowid INTEGER, last_rowid INTEGER);
 CREATE VIRTUAL TABLE messages USING fts5(
   content, role UNINDEXED, file_id UNINDEXED, ord UNINDEXED,
   tokenize = 'trigram');
@@ -238,11 +239,13 @@ def _sync(conn: sqlite3.Connection) -> dict:
 
 
 def _delete_files(conn: sqlite3.Connection, file_ids: list[int]) -> None:
-    """One pass over messages (file_id is UNINDEXED, so each delete scans)."""
+    """Delete each file's messages by its rowid range, then its files row."""
     if not file_ids:
         return
     marks = ",".join("?" * len(file_ids))
-    conn.execute(f"DELETE FROM messages WHERE file_id IN ({marks})", file_ids)
+    ranges = conn.execute(f"SELECT first_rowid, last_rowid FROM files WHERE id IN ({marks})"
+                          " AND first_rowid IS NOT NULL", file_ids).fetchall()
+    conn.executemany("DELETE FROM messages WHERE rowid BETWEEN ? AND ?", ranges)
     conn.execute(f"DELETE FROM files WHERE id IN ({marks})", file_ids)
 
 
@@ -255,17 +258,26 @@ def _index_file(conn: sqlite3.Connection, path: str, parser, pos: int,
 def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
                  st: _Sig, meta, session) -> None:
     """Store one file's parse results; st must be taken before parsing."""
+    messages = session.messages if session else []
+    # A file's messages get explicit consecutive rowids above every existing
+    # one, recorded as [first_rowid, last_rowid]. Only the flock holder
+    # writes, inside one transaction, so nothing can interleave.
+    first = last = None
+    if messages:
+        (top,) = conn.execute("SELECT coalesce((SELECT rowid FROM messages"
+                              " ORDER BY rowid DESC LIMIT 1), 0)").fetchone()
+        first, last = top + 1, top + len(messages)
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
         " session_id, workspace, title, started_at, ended_at, activity_ms,"
-        " s_session_id, s_workspace, s_title, s_started_at, s_ended_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " s_session_id, s_workspace, s_title, s_started_at, s_ended_at,"
+        " first_rowid, last_rowid)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (path, parser.agent_slug, st.size, st.mtime_ns, pos,
-         *_fresh_fields(meta, session)))
-    if session:
-        conn.executemany(
-            "INSERT INTO messages(content, role, file_id, ord) VALUES (?, ?, ?, ?)",
-            [(m.content, m.role, cur.lastrowid, i) for i, m in enumerate(session.messages)])
+         *_fresh_fields(meta, session), first, last))
+    conn.executemany(
+        "INSERT INTO messages(rowid, content, role, file_id, ord) VALUES (?, ?, ?, ?, ?)",
+        [(first + i, m.content, m.role, cur.lastrowid, i) for i, m in enumerate(messages)])
 
 
 def _session_fields(session) -> tuple:
@@ -328,15 +340,17 @@ def _fresh_fields(meta, session) -> tuple:
 
 
 def _stored_messages(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
-    """{file_id: [(content, role, ord)] in order}, in one pass over messages."""
+    """{file_id: [(content, role, ord)] in order}, read by each file's rowid range."""
     if not file_ids:
         return {}
     marks = ",".join("?" * len(file_ids))
     stored: dict = {}
-    for file_id, content, role, ord_ in conn.execute(
-            f"SELECT file_id, content, role, ord FROM messages WHERE file_id IN ({marks})"
-            " ORDER BY file_id, ord", file_ids):
-        stored.setdefault(file_id, []).append((content, role, ord_))
+    for file_id, first, last in conn.execute(
+            f"SELECT id, first_rowid, last_rowid FROM files WHERE id IN ({marks})"
+            " AND first_rowid IS NOT NULL", file_ids).fetchall():
+        stored[file_id] = conn.execute(
+            "SELECT content, role, ord FROM messages WHERE rowid BETWEEN ? AND ?"
+            " ORDER BY ord", (first, last)).fetchall()
     return stored
 
 
