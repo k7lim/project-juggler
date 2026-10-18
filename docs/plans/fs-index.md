@@ -352,3 +352,53 @@ are still slow after rollout.
 7. Remove every `@pending`; run the full suite.
 8. Host benchmark (rollout step 2). The nono check (privacy gate).
 9. README: document the scaling threshold of fs search and of the index.
+
+## Iteration 2 (after the failed gate, approved 2026-10-17)
+
+The first gate run showed where the time goes (see "Gate result" above). The
+index already answers in 0.1 s when nothing is dirty. Iteration 2 removes the
+three measured costs, fixes one correctness bug the run exposed, and adds the
+scoped CLI search to the benchmark. Keep/delete is decided again on the
+rerun. Revisit condition: if the rerun still fails, delete.
+
+1. **Directory sessions go stale (bug).** kimi's `list_sessions` yields
+   session directories. `os.stat(dir)` does not change when `wire.jsonl`
+   inside grows, so the index trusts an outdated kimi session. The file
+   signature (size, mtime_ns) becomes the aggregate of
+   `fs_store._signature_paths(path)`: summed sizes, newest mtime. That is the
+   same rule `fs_store.cache_signatures` already uses. It applies everywhere
+   the index stats a session path: refresh, the search dirty check, verify
+   and status.
+2. **Leftover tmp files** (pj-8qn.16).
+3. **Schema v2: delete by rowid, and store `model`.**
+   `DELETE FROM messages WHERE file_id IN (...)` scans the whole FTS table
+   (0.25 s per write-back). Each `files` row records the rowid range of its
+   messages (`first_rowid`, `last_rowid`). Inserts are contiguous under the
+   single writer. Deletes and the verify read then use
+   `rowid BETWEEN ? AND ?`. `files` also gains `model` (from
+   parse_metadata), which `list_projects(detail=True)` and the session
+   summaries need. `SCHEMA_VERSION = "2"`, so an existing v1 index counts as
+   outdated, and `refresh()` rebuilds it (pj-8qn.8).
+4. **Load message text lazily.** `_matching_messages` currently reads every
+   matching message's content up front (0.8 s for "auth"). It will first
+   collect only the matching `file_id`s. A file's matching messages are read
+   (rowid range plus the same MATCH or pj_count filter) only when
+   `search_candidates` reaches that file. The loop stops at `limit`, so a
+   common term reads only the files it returns.
+5. **Serve metadata from the index.** `list_projects`,
+   `recent_session_counts`, `sessions_by_project` and `project_sessions` are
+   rebuilt from the stored metadata columns for clean files, plus
+   `parse_metadata` for dirty ones. They stay in fs_store's
+   `list_sessions` order, through fs_store's own `_group_by_workspace` /
+   `_session_summary` / `_sort_summaries`, the same way search reuses
+   `search_candidates`. Results must equal fs_store's. This removes the
+   ~30 s each scoped CLI search spends parsing metadata (`discover` 15 s plus
+   `sessions_by_project` 15 s). The dirty bound and fallback apply as in
+   search.
+6. **Benchmark the CLI path.** `test_fs_index_worth_it.py` gains a scoped
+   case: `search.search(term, project=...)` under `set_store(fs_store)` and
+   then `set_store(fs_index)`, never in parallel, with the same identical-
+   results rule and the same p95 and speedup budgets. Then rerun on the host
+   (pj-8qn.13).
+
+All of these touch `pj/fs_index.py`, so they run one at a time in this order.
