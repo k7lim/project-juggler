@@ -1,6 +1,7 @@
 """Is the session index worth its complexity?  Measured on the real history (pj-nd2).
 
-Opt-in and slow (several minutes): runs only with PJ_BENCH_REAL=1.
+The two benchmarks are opt-in and slow (several minutes): they run only with
+PJ_BENCH_REAL=1.  The parity helper's unit test always runs.
 
     PJ_BENCH_REAL=1 python3 -m pytest -q -s tests/test_fs_index_worth_it.py
 
@@ -10,7 +11,8 @@ search.search(term, project=...)) under each store.  PJ_BENCH_PROJECT picks the
 project; it defaults to the one with the most sessions.
 
 The index earns its place only if, against today's fs_store search:
-  - results are identical for sessions that did not change during the run;
+  - results are identical for sessions that did not change during the run,
+    up to the limit boundary (see _same_up_to_tail);
   - p95 search latency is at most INDEX_P95_BUDGET_S;
   - the median speedup is at least MIN_SPEEDUP;
   - an up-to-date refresh (the per-search freshness check) costs at most
@@ -27,7 +29,7 @@ import pytest
 
 from pj import cache, fs_store, search, session_store
 
-pytestmark = pytest.mark.skipif(
+real_history = pytest.mark.skipif(
     os.environ.get("PJ_BENCH_REAL") != "1", reason="real-history benchmark; set PJ_BENCH_REAL=1")
 
 TERMS = ["auth", "middleware", "nono", "launchd", "rate limit", "pytest",
@@ -44,15 +46,85 @@ def _timed(fn, *args, **kwargs):
     return result, time.perf_counter() - start
 
 
+def _activity(hit):
+    return hit.get("ended_at") or hit.get("started_at") or ""
+
+
 def _stable(hits, since):
     """Drop sessions whose activity is newer than `since` (they changed mid-run)."""
-    return [h for h in hits if (h.get("ended_at") or h.get("started_at") or "") < since]
+    return [h for h in hits if _activity(h) < since]
 
 
-def _scoped_sessions(results, since):
-    """(agent, session_id) of the matching sessions that did not change since `since`."""
-    sessions = [s for project in results for s in project.get("matching_sessions", [])]
-    return sorted((s.get("agent", ""), str(s.get("session_id", ""))) for s in _stable(sessions, since))
+def _session_key(hit):
+    return (hit.get("agent", ""), str(hit.get("session_id", "")))
+
+
+def _unstable_count(a, b, since):
+    """Distinct sessions that _stable drops from either result list."""
+    return len({_session_key(h) for h in [*a, *b] if _activity(h) >= since})
+
+
+def _same_up_to_tail(a, b, unstable):
+    """Stable lists `a` and `b` (in result order) agree, tolerating the limit boundary.
+
+    fs and index run seconds apart.  A session that starts matching in between
+    can push the oldest entry out of one side's top `limit`; _stable drops the
+    newcomer but cannot restore what it displaced.  So up to `unstable` entries
+    may be missing from the tail of either list: compare the first
+    max(len) - unstable entries, which both lists must have.
+    """
+    n = max(len(a), len(b)) - unstable
+    return len(a) >= n and len(b) >= n and a[:n] == b[:n]
+
+
+def _same_content_hits(fs_hits, ix_hits, since):
+    return _same_up_to_tail(_stable(fs_hits, since), _stable(ix_hits, since),
+                            _unstable_count(fs_hits, ix_hits, since))
+
+
+def _scoped_sessions(results):
+    return [s for project in results for s in project.get("matching_sessions", [])]
+
+
+def _scoped_stable_keys(sessions, since):
+    """(agent, session_id) of the stable sessions, newest start first.
+
+    The scoped scan walks sessions by started_at, newest first, and stops at
+    `limit`, so a displaced session is the oldest start: it sits at the tail.
+    """
+    stable = sorted(_stable(sessions, since),
+                    key=lambda s: (s.get("started_at") or "", _session_key(s)), reverse=True)
+    return [_session_key(s) for s in stable]
+
+
+def _same_scoped(fs_res, ix_res, since):
+    fs_sessions, ix_sessions = _scoped_sessions(fs_res), _scoped_sessions(ix_res)
+    return _same_up_to_tail(_scoped_stable_keys(fs_sessions, since),
+                            _scoped_stable_keys(ix_sessions, since),
+                            _unstable_count(fs_sessions, ix_sessions, since))
+
+
+def test_parity_tolerates_only_the_limit_boundary():
+    since = "2026-10-18T00:00:00"
+
+    def hit(sid, at):
+        return {"agent": "claude_code", "session_id": sid, "ended_at": at}
+
+    old = [hit(f"s{i}", f"2026-10-17T0{9 - i}:00:00") for i in range(4)]
+    newcomer = hit("new", "2026-10-18T00:00:30")
+
+    assert _same_content_hits(old, list(old), since)
+    # The index ran later: a newcomer pushed the oldest session out of its top 4.
+    assert _same_content_hits(old, [newcomer, *old[:3]], since)
+    assert not _same_content_hits(old, [newcomer, old[0], old[2], old[3]], since)
+    assert not _same_content_hits(old, old[:3], since)
+
+    def project(sessions):
+        return [{"matching_sessions": [{**s, "started_at": s["ended_at"]} for s in sessions]}]
+
+    assert _same_scoped(project(old), project(old[::-1]), since)
+    assert _same_scoped(project(old), project([newcomer, *old[:3]]), since)
+    assert not _same_scoped(project(old), project([newcomer, old[0], old[2], old[3]]), since)
 
 
 def _p95(times):
@@ -79,6 +151,7 @@ def built_index():
     return started, build_s, noop_s
 
 
+@real_history
 def test_index_is_worth_it_on_real_history(built_index):
     from pj import fs_index
 
@@ -87,7 +160,7 @@ def test_index_is_worth_it_on_real_history(built_index):
     for term in TERMS:
         fs_hits, fs_s = _timed(fs_store.search_content, term, limit=100, sort="newest")
         ix_hits, ix_s = _timed(fs_index.search_content, term, limit=100, sort="newest")
-        rows.append((term, fs_s, ix_s, _stable(fs_hits, started) == _stable(ix_hits, started)))
+        rows.append((term, fs_s, ix_s, _same_content_hits(fs_hits, ix_hits, started)))
 
     print(f"\nbuild {build_s:.0f}s, no-op refresh {noop_s:.2f}s")
     for term, fs_s, ix_s, same in rows:
@@ -101,6 +174,7 @@ def test_index_is_worth_it_on_real_history(built_index):
     assert noop_s <= NOOP_REFRESH_BUDGET_S, f"freshness check {noop_s:.2f}s over budget"
 
 
+@real_history
 def test_scoped_cli_search_is_worth_it_on_real_history(built_index, monkeypatch):
     """`pj search <term> --project <name>` under fs_store, then under fs_index.
 
@@ -125,9 +199,8 @@ def test_scoped_cli_search_is_worth_it_on_real_history(built_index, monkeypatch)
             fs_res, fs_s = _timed(search.search, term, project=project)
             session_store.set_store(fs_index)
             ix_res, ix_s = _timed(search.search, term, project=project)
-            fs_sessions = _scoped_sessions(fs_res, started)
-            rows.append((term, fs_s, ix_s, len(fs_sessions),
-                         fs_sessions == _scoped_sessions(ix_res, started)))
+            n = len(_stable(_scoped_sessions(fs_res), started))
+            rows.append((term, fs_s, ix_s, n, _same_scoped(fs_res, ix_res, started)))
     finally:
         session_store.set_store(original)
 
