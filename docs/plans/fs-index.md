@@ -204,7 +204,8 @@ and warns "run `pj index refresh`". A burst of new history (October added
 **Divergence check (complexity guide #5).** Size plus mtime misses a file
 rewritten with the same size and mtime. That is rare, so it is not checked per
 search. It is caught by `refresh(verify=True)`, which compares a sample of
-indexed sessions with a fresh parse and reports any mismatches. The worth-it
+indexed sessions (default 50) with a fresh parse, reports any mismatches in
+`mismatched`, and re-indexes them. The worth-it
 benchmark is the full version of that check.
 
 ### Concurrency model (principle #14)
