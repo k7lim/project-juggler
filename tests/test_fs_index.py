@@ -224,6 +224,14 @@ def test_wrong_schema_index_falls_back_until_refresh(corpus, fs_index, monkeypat
     _assert_index_is_used(fs_index, monkeypatch)
 
 
+def test_refresh_rebuilds_a_corrupt_index(corpus, fs_index, monkeypatch):
+    from pj import paths
+    fs_index.refresh()
+    paths.index_path().write_bytes(b"not a database")
+    fs_index.refresh()
+    _assert_index_is_used(fs_index, monkeypatch)
+
+
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
     from pj import paths
     fs_index.refresh()
