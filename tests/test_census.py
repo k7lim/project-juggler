@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -740,6 +741,7 @@ def test_census_process_start_launches_background_server(tmp_path, monkeypatch):
     process.poll.return_value = None
 
     with mock.patch("pj.census_process.subprocess.Popen", return_value=process) as popen, \
+         mock.patch("pj.census_process.port_is_free", return_value=True), \
          mock.patch("pj.census_process._is_process_alive", return_value=True), \
          mock.patch(
              "pj.census_process._request_json",
@@ -750,11 +752,85 @@ def test_census_process_start_launches_background_server(tmp_path, monkeypatch):
     assert result["running"] is True
     assert result["started"] is True
     assert result["url"] == "http://127.0.0.1:9876/"
+    assert result["port_auto_selected"] is False
     assert "control_token" not in result
     stored = json.loads(census_process.state_path().read_text(encoding="utf-8"))
     assert stored["pid"] == 4321
     assert stored["control_token"]
     popen.assert_called_once()
+
+
+def test_find_free_port_skips_a_bound_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+
+        assert census_process.port_is_free("127.0.0.1", busy) is False
+        assert census_process.find_free_port("127.0.0.1", busy) == busy + 1
+
+
+def test_census_process_start_picks_a_free_port_when_none_requested(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+    process = mock.Mock(pid=4321)
+    process.poll.return_value = None
+
+    with mock.patch("pj.census_process.subprocess.Popen", return_value=process) as popen, \
+         mock.patch("pj.census_process.find_free_port", return_value=8770) as find_port, \
+         mock.patch("pj.census_process._is_process_alive", return_value=True), \
+         mock.patch(
+             "pj.census_process._request_json",
+             return_value={"success": True, "data": {"status": "running"}, "meta": {}},
+         ):
+        result = census_process.start(host="127.0.0.1", limit=5, check_interval=3)
+
+    find_port.assert_called_once_with("127.0.0.1", census_process.DEFAULT_PORT)
+    assert result["running"] is True
+    assert result["port"] == 8770
+    assert result["url"] == "http://127.0.0.1:8770/"
+    assert result["port_auto_selected"] is True
+    assert "--port" in popen.call_args.args[0]
+    assert "8770" in popen.call_args.args[0]
+
+
+def test_census_process_start_refuses_an_explicitly_busy_port(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+
+    with mock.patch("pj.census_process.subprocess.Popen") as popen, \
+         mock.patch("pj.census_process.port_is_free", return_value=False):
+        result = census_process.start(host="127.0.0.1", port=8765, limit=5, check_interval=3)
+
+    popen.assert_not_called()
+    assert result["running"] is False
+    assert result["started"] is False
+    assert result["status"] == "port-unavailable"
+    assert "8765 is already in use" in result["error"]
+
+
+def test_census_process_start_reports_child_exit_and_log_tail(tmp_path, monkeypatch):
+    monkeypatch.setenv("PJ_DATA_DIR", str(tmp_path))
+    census_process.log_path().parent.mkdir(parents=True, exist_ok=True)
+    census_process.log_path().write_text("stale failure from an earlier run\n", encoding="utf-8")
+
+    process = mock.Mock(pid=4321)
+
+    def crash(*_args, **_kwargs):
+        with census_process.log_path().open("a", encoding="utf-8") as handle:
+            handle.write("OSError: [Errno 48] Address already in use\n")
+        return process
+
+    process.poll.return_value = 1
+
+    with mock.patch("pj.census_process.subprocess.Popen", side_effect=crash), \
+         mock.patch("pj.census_process.port_is_free", return_value=True), \
+         mock.patch("pj.census_process._is_process_alive", return_value=False), \
+         mock.patch("pj.census_process._request_json", return_value=None):
+        result = census_process.start(host="127.0.0.1", port=9876, limit=5, check_interval=3)
+
+    assert result["running"] is False
+    assert result["exit_code"] == 1
+    assert result["log_tail"] == ["OSError: [Errno 48] Address already in use"]
+    assert "Address already in use" in result["error"]
 
 
 def test_census_process_stop_reports_final_stopped_state(tmp_path, monkeypatch):

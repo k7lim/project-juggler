@@ -156,6 +156,11 @@ pj census stop               # Graceful shutdown via local control endpoint
 structured JSON, the server metadata is stored under `PJ_DATA_DIR`, and `stop`
 uses a per-process local control token instead of parsing logs or guessing ports.
 
+`serve` and `start` bind the first free port from 8765 upward, so another
+project already holding 8765 does not block the dashboard; the chosen port is in
+the `url`/`port` fields of `start` and `status`. Pass `--port` to pin a specific
+port — a pinned port that is busy is reported as an error rather than moved.
+
 ### `pj ports` - Local runtime port discovery
 
 `pj ports` reports local development servers and other runtime ports that can be

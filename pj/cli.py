@@ -265,7 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include matching local runtime ports in census rows",
     )
     census_p.add_argument("--host", default="127.0.0.1", help="Serve host (default: 127.0.0.1)")
-    census_p.add_argument("--port", type=int, default=8765, help="Serve port (default: 8765)")
+    census_p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Serve port (default: first free port from 8765 upward)",
+    )
     census_p.add_argument(
         "--check-interval",
         type=int,
@@ -506,11 +511,24 @@ def _cmd_chat(args: argparse.Namespace) -> None:
 
 def _cmd_census(args: argparse.Namespace) -> None:
     if args.census_action == "serve":
-        from . import census_server
+        from . import census_process, census_server
+
+        port = args.port
+        if port is None:
+            port = census_process.find_free_port(args.host, census_process.DEFAULT_PORT)
+            if port is None:
+                last = census_process.DEFAULT_PORT + census_process.PORT_SCAN_ATTEMPTS - 1
+                env = envelope.err(
+                    f"no free port between {census_process.DEFAULT_PORT} and {last} "
+                    f"on {args.host}",
+                    source="census",
+                )
+                print(envelope.to_json(env))
+                sys.exit(1)
 
         census_server.serve(
             host=args.host,
-            port=args.port,
+            port=port,
             limit=args.limit,
             check_interval=args.check_interval,
         )
@@ -527,12 +545,19 @@ def _cmd_census(args: argparse.Namespace) -> None:
                 check_interval=args.check_interval,
             )
             if not result.get("running"):
+                detail = result.get("error")
+                if result.get("status") == "port-unavailable":
+                    message = f"census server not started: {detail}"
+                elif detail:
+                    message = f"census server did not become healthy: {detail}"
+                else:
+                    message = "census server did not become healthy"
                 print(
                     envelope.to_json(
                         {
                             "success": False,
                             "data": result,
-                            "meta": {"error": "census server did not become healthy"},
+                            "meta": {"error": message},
                         }
                     )
                 )

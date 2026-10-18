@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -18,6 +19,8 @@ from . import paths
 
 STATE_FILE = "census-server.json"
 LOG_FILE = "census-server.log"
+DEFAULT_PORT = 8765
+PORT_SCAN_ATTEMPTS = 20
 
 
 def state_path() -> Path:
@@ -72,6 +75,41 @@ def _is_process_alive(pid: int | None) -> bool:
     if result.returncode != 0:
         return False
     return not result.stdout.lstrip().startswith("Z")
+
+
+def port_is_free(host: str, port: int) -> bool:
+    """Probe a port the same way the server binds it (SO_REUSEADDR, like HTTPServer)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def find_free_port(
+    host: str,
+    start_port: int = DEFAULT_PORT,
+    *,
+    attempts: int = PORT_SCAN_ATTEMPTS,
+) -> int | None:
+    """First free port at or above start_port, or None if the scan range is full."""
+    for candidate in range(start_port, min(start_port + attempts, 65536)):
+        if port_is_free(host, candidate):
+            return candidate
+    return None
+
+
+def _log_since(offset: int, *, limit: int = 20) -> list[str]:
+    """Lines the server wrote after `offset`, so old failures are not re-reported."""
+    try:
+        with log_path().open("rb") as handle:
+            handle.seek(offset)
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return text.splitlines()[-limit:]
 
 
 def _health_url(state: dict[str, Any]) -> str:
@@ -137,10 +175,24 @@ def status() -> dict[str, Any]:
     return result
 
 
+def _port_error(host: str, port: int, message: str) -> dict[str, Any]:
+    return {
+        "status": "port-unavailable",
+        "running": False,
+        "started": False,
+        "already_running": False,
+        "host": host,
+        "port": port,
+        "error": message,
+        "state_file": str(state_path()),
+        "log_file": str(log_path()),
+    }
+
+
 def start(
     *,
     host: str,
-    port: int,
+    port: int | None = None,
     limit: int,
     check_interval: int,
     wait_secs: float = 5.0,
@@ -151,6 +203,21 @@ def start(
 
     if current["status"] == "stale":
         remove_state()
+
+    # port=None means "pick one that's free"; an explicit port is honoured or refused.
+    auto_port = port is None
+    if auto_port:
+        scanned = find_free_port(host, DEFAULT_PORT)
+        if scanned is None:
+            last = DEFAULT_PORT + PORT_SCAN_ATTEMPTS - 1
+            return _port_error(
+                host,
+                DEFAULT_PORT,
+                f"no free port between {DEFAULT_PORT} and {last} on {host}",
+            )
+        port = scanned
+    elif not port_is_free(host, port):
+        return _port_error(host, port, f"port {port} is already in use on {host}")
 
     token = secrets.token_urlsafe(32)
     url = f"http://{host}:{port}/"
@@ -172,6 +239,7 @@ def start(
 
     log = log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
+    log_offset = log.stat().st_size if log.exists() else 0
     env = os.environ.copy()
     env["PJ_CENSUS_CONTROL_TOKEN"] = token
     env["PJ_CENSUS_BACKGROUND"] = "1"
@@ -204,14 +272,31 @@ def start(
         if process.poll() is not None:
             break
         if _request_json(_health_url(state), timeout=0.2):
-            return {**status(), "started": True, "already_running": False}
+            return {
+                **status(),
+                "started": True,
+                "already_running": False,
+                "port_auto_selected": auto_port,
+            }
         time.sleep(0.1)
 
     current = status()
     if not current["running"]:
         current.update(started=False, already_running=False)
+        exit_code = process.poll()
+        if exit_code is not None:
+            current["exit_code"] = exit_code
+        log_lines = _log_since(log_offset)
+        if log_lines:
+            current["log_tail"] = log_lines
+            current.setdefault("error", log_lines[-1].strip())
         return current
-    return {**current, "started": True, "already_running": False}
+    return {
+        **current,
+        "started": True,
+        "already_running": False,
+        "port_auto_selected": auto_port,
+    }
 
 
 def stop(*, wait_secs: float = 5.0) -> dict[str, Any]:
