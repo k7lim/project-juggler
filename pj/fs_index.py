@@ -4,9 +4,9 @@ Implements the SessionStore protocol (session_store.py). It must give the
 same results as fs_store, and fs_store results whenever the index cannot
 answer. See docs/plans/fs-index.md.
 
-refresh() builds the index file. search_content answers unchanged files
-from it and parses only the dirty set (new or changed files); the other
-calls still delegate to fs_store.
+refresh() builds the index file. search_content and search_sessions answer
+unchanged files from it and parse only the dirty set (new or changed
+files); the other calls still delegate to fs_store.
 """
 from __future__ import annotations
 
@@ -293,6 +293,24 @@ def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str)
     return fs_store.search_candidates(candidates, query, limit=limit, sort=sort)
 
 
+def _search_sessions(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
+    """Titles come from files.title; fs_store's own loop decides the matches."""
+    rows = _indexed_rows(conn)
+    metas = (parser.parse_metadata(path) if row is None else _stored_metadata(row)
+             for path, parser, row in _listed(rows))
+    return fs_store.search_titles(metas, query, limit=limit, sort=sort)
+
+
+def _stored_metadata(row):
+    """The parse_metadata result as stored, or None when it was None."""
+    if row["session_id"] is None:
+        return None
+    return base.NormalizedSession(
+        session_id=row["session_id"], agent=row["agent"], source_path=row["path"],
+        workspace=row["workspace"], title=row["title"],
+        started_at=row["started_at"], ended_at=row["ended_at"])
+
+
 def _stored_session(row, hits: dict):
     """The stored session with only its candidate messages, or None if none match.
 
@@ -363,7 +381,9 @@ def session_details(session_ids: list) -> dict:
 
 
 def search_sessions(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:
-    return fs_store.search_sessions(query, limit=limit, sort=sort)
+    return _with_index(
+        lambda conn: _search_sessions(conn, query, limit, sort),
+        lambda: fs_store.search_sessions(query, limit=limit, sort=sort))
 
 
 def search_content(query: str, limit: int = 20, sort: str = "newest") -> list[dict]:

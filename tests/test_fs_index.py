@@ -126,6 +126,14 @@ def test_search_content_matches_fs_store_exactly(corpus, fs_index, query, sort):
     assert_same_as_fs(fs_index, query, sort=sort)
 
 
+@pytest.mark.parametrize("sort", ["newest", "oldest", "relevance"])
+@pytest.mark.parametrize("query", QUERIES)
+def test_search_sessions_matches_fs_store_exactly(corpus, fs_index, query, sort):
+    fs_index.refresh()
+    expected = fs_store.search_sessions(query, sort=sort)
+    assert fs_index.search_sessions(query, sort=sort) == expected, query
+
+
 @pytest.mark.parametrize("limit", [1, 2, 3, 100])
 def test_limit_cuts_at_the_same_session_as_fs_store(corpus, fs_index, limit):
     fs_index.refresh()
@@ -185,10 +193,12 @@ def _forbid_parsing(monkeypatch):
 def test_index_is_used(corpus, fs_index, monkeypatch, sort):
     """After refresh() no file is dirty, so searches must not parse at all."""
     expected = {q: fs_store.search_content(q, sort=sort) for q in QUERIES}
+    expected_titles = {q: fs_store.search_sessions(q, sort=sort) for q in QUERIES}
     fs_index.refresh()
     _forbid_parsing(monkeypatch)
     for query in QUERIES:
         assert fs_index.search_content(query, sort=sort) == expected[query], query
+        assert fs_index.search_sessions(query, sort=sort) == expected_titles[query], query
 
 
 def test_index_file_is_owner_only_and_under_data_dir(corpus, fs_index):
