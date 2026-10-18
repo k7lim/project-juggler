@@ -497,3 +497,22 @@ so pj-8qn.10's narrowing stays a superset. The two were identical in only
 
    Stop condition: if the v3 build on the host exceeds 150 s or the index
    grows more than 50%, stop and report. Do not ship.
+
+### Gate result, iteration 3 (pj-8qn.13 rerun, host, 2026-10-18): PASS
+
+Build 97 s, 0.78 GB (schema v3), no-op refresh 0.77 s (budget 1 s).
+
+Content search, fs / index: auth 18.3 s / 540 ms, middleware 29.9 s / 501 ms,
+nono 21.9 s / 489 ms, launchd 43.4 s / 734 ms, rate limit 23.8 s / 573 ms,
+pytest 47.5 s / 666 ms, classifier 31.0 s / 522 ms, yolobox 21.0 s / 547 ms,
+zyzzyva-absent 61.1 s / 674 ms. All identical. p95 0.73 s, median speedup
+about 59x.
+
+Scoped CLI search, `--project project-juggler`, fs / index: pytest
+31.9 s / 619 ms, nono 32.0 s / 591 ms, rate limit 28.4 s / 678 ms. All
+identical. p95 0.68 s, speedup 42-54x.
+
+Content search is about 150 ms slower than in iteration 2 (0.31-0.64 s),
+not yet profiled. Suspects: the wider `messages` rows in schema v3, or the
+write-back's extra tree parse for dirty Claude files. The no-op refresh rose
+from 0.57 to 0.77 s and is now close to its 1 s budget.
