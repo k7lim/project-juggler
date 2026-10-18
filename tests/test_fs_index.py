@@ -712,6 +712,20 @@ def _assert_rowid_ranges_exact():
     for file_id, first, last in files:
         expected = [] if first is None else list(range(first, last + 1))
         assert sorted(by_file.get(file_id, [])) == expected, file_id
+    _assert_tree_ranges_exact()
+
+
+def _assert_tree_ranges_exact():
+    """tree_messages is exactly the union of disjoint t_first_rowid..t_last_rowid ranges."""
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        rowids = sorted(r for (r,) in conn.execute("SELECT rowid FROM tree_messages"))
+        ranges = conn.execute("SELECT t_first_rowid, t_last_rowid FROM files"
+                              " WHERE t_first_rowid IS NOT NULL").fetchall()
+    finally:
+        conn.close()
+    assert rowids == sorted(r for first, last in ranges for r in range(first, last + 1))
 
 
 def _trace_sql(monkeypatch):
@@ -750,7 +764,7 @@ def test_refresh_and_write_back_delete_messages_by_rowid_range(corpus, fs_index,
     _assert_index_is_used(fs_index, monkeypatch)
 
 
-def test_v1_index_falls_back_until_refresh_rebuilds_it_as_v2(corpus, fs_index, monkeypatch, capsys):
+def test_v1_index_falls_back_until_refresh_rebuilds_it_as_current(corpus, fs_index, monkeypatch, capsys):
     from pj import paths
     monkeypatch.setattr(fs_index, "_warned", False)
     paths.index_path().parent.mkdir(parents=True, exist_ok=True)
@@ -762,7 +776,8 @@ def test_v1_index_falls_back_until_refresh_rebuilds_it_as_v2(corpus, fs_index, m
     assert fs_index.refresh()["rebuilt"] is True
     conn = sqlite3.connect(str(paths.index_path()))
     try:
-        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("2",)
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == \
+            (fs_index.SCHEMA_VERSION,)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
     finally:
         conn.close()
@@ -963,3 +978,91 @@ def test_scoped_search_parses_no_clean_file(meta_corpus, fs_index, monkeypatch):
     monkeypatch.setattr(claude_code, "parse_session_tree", recording(claude_code.parse_session_tree))
     assert _search_with(fs_index, monkeypatch, "needle", project="alpha") == expected
     assert set(parsed) == {_path(meta_corpus, C1)}  # the candidate's load_session_file
+
+
+# --- load_session_file from the index: schema v3 (pj-8qn.25) ---
+
+B1 = ".claude/projects/-w-alpha/b1.jsonl"
+
+
+def branched_session(home):
+    """A claude session with an abandoned fork, a tool call and its result.
+
+    parse_session keeps every line; parse_session_tree keeps the active
+    branch (last child at the fork) and tags it, so the two views differ.
+    """
+    def event(uuid, parent, role, content, second, **extra):
+        return {"type": role, "sessionId": "b1", "cwd": "/w/alpha", "uuid": uuid,
+                "parentUuid": parent, "timestamp": f"2026-09-09T00:00:{second:02d}Z",
+                "message": {"role": role, "content": content, **extra}}
+    return _write(sessions_home(home) / B1, [
+        event("b1-0", None, "user", [{"type": "text", "text": "branch needle start"}], 0),
+        event("b1-1", "b1-0", "assistant", [{"type": "text", "text": "abandoned reply"}], 1,
+              model="claude-old"),
+        event("b1-2", "b1-0", "assistant",
+              [{"type": "text", "text": "active needle reply"},
+               {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}],
+              2, model="claude-test-2"),
+        event("b1-3", "b1-2", "user",
+              [{"type": "tool_result", "tool_use_id": "t1", "content": "file.txt"}], 3),
+    ])
+
+
+def _index_tables():
+    from pj import paths
+    conn = sqlite3.connect(str(paths.index_path()))
+    try:
+        return {name for (name,) in conn.execute("SELECT name FROM sqlite_master")}
+    finally:
+        conn.close()
+
+
+def test_v2_index_is_outdated_and_rebuilt(corpus, fs_index, monkeypatch, capsys):
+    monkeypatch.setattr(fs_index, "_warned", False)
+    fs_index.refresh()
+    from pj import paths
+    with sqlite3.connect(str(paths.index_path())) as conn:  # what a v2 index lacks
+        conn.execute("DROP TABLE tree_messages")
+        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    conn.close()
+    assert_same_as_fs(fs_index, "needle")
+    assert capsys.readouterr().err.count("session index unavailable") == 1
+    assert fs_index.refresh()["rebuilt"] is True
+    assert "tree_messages" in _index_tables()
+    _assert_index_is_used(fs_index, monkeypatch)
+
+
+def test_verify_repairs_a_tampered_tree_row(corpus, fs_index):
+    branched_session(corpus)
+    fs_index.refresh()
+    path = _path(corpus, B1)
+    assert fs_index.refresh(verify=True)["mismatched"] == []
+    _tamper("UPDATE tree_messages SET content = 'tampered'"
+            " WHERE rowid = (SELECT t_first_rowid FROM files WHERE path = ?)", path)
+    first = fs_index.refresh(verify=True)
+    assert (first["mismatched"], first["repaired"]) == ([path], 1)
+    assert fs_index.refresh(verify=True)["mismatched"] == []
+    _assert_rowid_ranges_exact()
+
+
+@pytest.mark.parametrize("column", ["branch", "uuid", "parent_uuid", "author", "created_at"])
+def test_verify_repairs_a_tampered_tree_message_field(corpus, fs_index, column):
+    branched_session(corpus)
+    fs_index.refresh()
+    path = _path(corpus, B1)
+    _tamper(f"UPDATE tree_messages SET {column} = 'tampered'"
+            " WHERE rowid = (SELECT t_last_rowid FROM files WHERE path = ?)", path)
+    assert fs_index.refresh(verify=True)["mismatched"] == [path]
+
+
+@pytest.mark.parametrize("sql", [
+    "UPDATE files SET t_model = 'tampered' WHERE path = ?",
+    "UPDATE files SET s_model = 'tampered' WHERE path = ?",
+    "UPDATE messages SET created_at = 1 WHERE file_id = (SELECT id FROM files WHERE path = ?)",
+])
+def test_verify_repairs_tampered_load_fields(corpus, fs_index, sql):
+    branched_session(corpus)
+    fs_index.refresh()
+    path = _path(corpus, B1) if "t_model" in sql else _path(corpus, X1)
+    _tamper(sql, path)
+    assert fs_index.refresh(verify=True)["mismatched"] == [path]

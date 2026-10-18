@@ -29,7 +29,7 @@ from typing import NamedTuple
 from . import fs_store, paths
 from .parsers import base
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 _SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -40,12 +40,25 @@ CREATE TABLE files(
   session_id TEXT, workspace TEXT, title TEXT,
   started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL, model TEXT,
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
-  s_started_at INTEGER, s_ended_at INTEGER,
-  first_rowid INTEGER, last_rowid INTEGER);
+  s_started_at INTEGER, s_ended_at INTEGER, s_model TEXT,
+  first_rowid INTEGER, last_rowid INTEGER,
+  t_session_id TEXT, t_workspace TEXT, t_title TEXT,
+  t_started_at INTEGER, t_ended_at INTEGER, t_model TEXT,
+  t_first_rowid INTEGER, t_last_rowid INTEGER);
 CREATE VIRTUAL TABLE messages USING fts5(
   content, role UNINDEXED, file_id UNINDEXED, ord UNINDEXED,
+  idx UNINDEXED, author UNINDEXED, created_at UNINDEXED,
+  branch UNINDEXED, uuid UNINDEXED, parent_uuid UNINDEXED,
   tokenize = 'trigram');
+CREATE TABLE tree_messages(
+  rowid INTEGER PRIMARY KEY, idx INTEGER, role TEXT, content TEXT,
+  author TEXT, created_at INTEGER, branch TEXT, uuid TEXT, parent_uuid TEXT);
 """
+
+# What fs_store.load_session_file parses (fs_store._parse_full): the stored
+# parse_session for codex and kimi; for claude_code the active-branch tree,
+# kept in tree_messages and the t_* columns.
+TREE_AGENT = "claude_code"
 
 
 def cache_signatures() -> dict[str, float]:
@@ -242,45 +255,86 @@ def _sync(conn: sqlite3.Connection) -> dict:
 
 
 def _delete_files(conn: sqlite3.Connection, file_ids: list[int]) -> None:
-    """Delete each file's messages by its rowid range, then its files row."""
+    """Delete each file's messages and tree messages by rowid range, then its files row."""
     if not file_ids:
         return
     marks = ",".join("?" * len(file_ids))
-    ranges = conn.execute(f"SELECT first_rowid, last_rowid FROM files WHERE id IN ({marks})"
-                          " AND first_rowid IS NOT NULL", file_ids).fetchall()
-    conn.executemany("DELETE FROM messages WHERE rowid BETWEEN ? AND ?", ranges)
+    for table, first, last in (("messages", "first_rowid", "last_rowid"),
+                               ("tree_messages", "t_first_rowid", "t_last_rowid")):
+        ranges = conn.execute(f"SELECT {first}, {last} FROM files WHERE id IN ({marks})"
+                              f" AND {first} IS NOT NULL", file_ids).fetchall()
+        conn.executemany(f"DELETE FROM {table} WHERE rowid BETWEEN ? AND ?", ranges)
     conn.execute(f"DELETE FROM files WHERE id IN ({marks})", file_ids)
 
 
 def _index_file(conn: sqlite3.Connection, path: str, parser, pos: int,
                 st: _Sig) -> None:
-    _insert_file(conn, path, parser, pos, st,
-                 parser.parse_metadata(path), parser.parse_session(path))
+    session = parser.parse_session(path)
+    _insert_file(conn, path, parser, pos, st, parser.parse_metadata(path), session,
+                 _full_view(parser, path, session))
+
+
+def _full_view(parser, path: str, session):
+    """fs_store._parse_full's result for load_session_file; session is parse_session's."""
+    if parser.agent_slug != TREE_AGENT:
+        return session  # _parse_full is parse_session itself
+    return fs_store._parse_full(parser, path, False, True, None)
 
 
 def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
-                 st: _Sig, meta, session) -> None:
-    """Store one file's parse results; st must be taken before parsing."""
+                 st: _Sig, meta, session, full) -> None:
+    """Store one file's parse results; st must be taken before parsing.
+
+    full is _full_view's result; for codex and kimi it is session itself.
+    """
     messages = session.messages if session else []
-    # A file's messages get explicit consecutive rowids above every existing
-    # one, recorded as [first_rowid, last_rowid]. Only the flock holder
-    # writes, inside one transaction, so nothing can interleave.
-    first = last = None
-    if messages:
-        (top,) = conn.execute("SELECT coalesce((SELECT rowid FROM messages"
-                              " ORDER BY rowid DESC LIMIT 1), 0)").fetchone()
-        first, last = top + 1, top + len(messages)
+    first, last = _rowid_range(conn, "messages", messages)
+    tree = full if parser.agent_slug == TREE_AGENT else None
+    t_messages = tree.messages if tree else []
+    t_first, t_last = _rowid_range(conn, "tree_messages", t_messages)
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
         " session_id, workspace, title, started_at, ended_at, activity_ms, model,"
-        " s_session_id, s_workspace, s_title, s_started_at, s_ended_at,"
-        " first_rowid, last_rowid)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " s_session_id, s_workspace, s_title, s_started_at, s_ended_at, s_model,"
+        " first_rowid, last_rowid,"
+        " t_session_id, t_workspace, t_title, t_started_at, t_ended_at, t_model,"
+        " t_first_rowid, t_last_rowid)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+        " ?, ?, ?, ?, ?, ?, ?, ?)",
         (path, parser.agent_slug, st.size, st.mtime_ns, pos,
-         *_fresh_fields(meta, session), first, last))
+         *_fresh_fields(meta, session), first, last,
+         *_session_fields(tree), tree.model if tree else None, t_first, t_last))
     conn.executemany(
-        "INSERT INTO messages(rowid, content, role, file_id, ord) VALUES (?, ?, ?, ?, ?)",
-        [(first + i, m.content, m.role, cur.lastrowid, i) for i, m in enumerate(messages)])
+        "INSERT INTO messages(rowid, content, role, file_id, ord,"
+        " idx, author, created_at, branch, uuid, parent_uuid)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(first + i, m.content, m.role, cur.lastrowid, i, *_message_extras(m))
+         for i, m in enumerate(messages)])
+    conn.executemany(
+        "INSERT INTO tree_messages(rowid, content, role,"
+        " idx, author, created_at, branch, uuid, parent_uuid)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(t_first + i, m.content, m.role, *_message_extras(m))
+         for i, m in enumerate(t_messages)])
+
+
+def _rowid_range(conn: sqlite3.Connection, table: str, messages: list) -> tuple:
+    """(first, last) rowids for messages, or (None, None) when there are none.
+
+    A file's messages get explicit consecutive rowids above every existing
+    one in table. Only the flock holder writes, inside one transaction, so
+    nothing can interleave.
+    """
+    if not messages:
+        return None, None
+    (top,) = conn.execute(f"SELECT coalesce((SELECT rowid FROM {table}"
+                          " ORDER BY rowid DESC LIMIT 1), 0)").fetchone()
+    return top + 1, top + len(messages)
+
+
+def _message_extras(m) -> tuple:
+    """The NormalizedMessage fields _session_to_dict emits besides content and role."""
+    return (m.idx, m.author, m.created_at, m.branch, m.uuid, m.parent_uuid)
 
 
 def _session_fields(session) -> tuple:
@@ -315,6 +369,7 @@ def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> d
                                     " ORDER BY id") if r[2] in parsers]
     sample = rng.sample(rows, min(sample_size, len(rows)))
     stored = _stored_messages(conn, [r[0] for r in sample])
+    rows_by_id = _rows_by_id(conn, [r[0] for r in sample])
     checked, bad = 0, []
     for file_id, path, agent, pos, *fields in sample:
         st = _stat(path)  # taken before parsing, as _insert_file requires
@@ -323,23 +378,43 @@ def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> d
         checked += 1
         parser = parsers[agent]
         meta, session = parser.parse_metadata(path), parser.parse_session(path)
+        full = _full_view(parser, path, session)
         if (stored.get(file_id, []) != _fresh_messages(session)
-                or tuple(fields) != _fresh_fields(meta, session)):
-            bad.append((file_id, path, parser, pos, st, meta, session))
+                or tuple(fields) != _fresh_fields(meta, session)
+                or _stored_full(conn, rows_by_id[file_id]) != _full_dict(full)):
+            bad.append((file_id, path, parser, pos, st, meta, session, full))
     _delete_files(conn, [b[0] for b in bad])
-    for _, path, parser, pos, st, meta, session in bad:
-        _insert_file(conn, path, parser, pos, st, meta, session)
+    for _, path, parser, pos, st, meta, session, full in bad:
+        _insert_file(conn, path, parser, pos, st, meta, session, full)
     return {"checked": checked, "mismatched": sorted(b[1] for b in bad), "repaired": len(bad)}
 
 
 _FIELDS = ("session_id, workspace, title, started_at, ended_at, activity_ms, model,"
-           " s_session_id, s_workspace, s_title, s_started_at, s_ended_at")
+           " s_session_id, s_workspace, s_title, s_started_at, s_ended_at, s_model")
 
 
 def _fresh_fields(meta, session) -> tuple:
     """The _FIELDS values _insert_file would store for this parse."""
     return (*_session_fields(meta), fs_store._activity_ms(meta) if meta else 0,
-            meta.model if meta else None, *_session_fields(session))
+            meta.model if meta else None, *_session_fields(session),
+            session.model if session else None)
+
+
+def _rows_by_id(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
+    if not file_ids:
+        return {}
+    marks = ",".join("?" * len(file_ids))
+    conn.row_factory = sqlite3.Row
+    try:
+        return {row["id"]: row for row in conn.execute(
+            f"SELECT * FROM files WHERE id IN ({marks})", file_ids)}
+    finally:
+        conn.row_factory = None
+
+
+def _full_dict(full) -> dict | None:
+    """fs_store.load_session_file's result for this _full_view result."""
+    return fs_store._session_to_dict(full) if full else None
 
 
 def _stored_messages(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
@@ -577,12 +652,22 @@ def _write_back_locked(index: Path, parsed: list) -> None:
 
 
 def _replace_files(conn: sqlite3.Connection, parsed: list) -> None:
-    marks = ",".join("?" * len(parsed))
+    """Store each dirty file with its _full_view; for claude_code that parses the tree.
+
+    A None tree is never stored, for the reason _parse_and_keep gives: the
+    file stays dirty and load_session_file delegates to fs_store for it.
+    """
+    rows = [(dirty, meta, session, _full_view(dirty.parser, dirty.path, session))
+            for dirty, meta, session in parsed]
+    rows = [r for r in rows if r[3] is not None]
+    if not rows:
+        return
+    marks = ",".join("?" * len(rows))
     old_ids = [file_id for (file_id,) in conn.execute(
-        f"SELECT id FROM files WHERE path IN ({marks})", [d.path for d, _, _ in parsed])]
+        f"SELECT id FROM files WHERE path IN ({marks})", [r[0].path for r in rows])]
     _delete_files(conn, old_ids)
-    for dirty, meta, session in parsed:
-        _insert_file(conn, dirty.path, dirty.parser, dirty.pos, dirty.st, meta, session)
+    for dirty, meta, session, full in rows:
+        _insert_file(conn, dirty.path, dirty.parser, dirty.pos, dirty.st, meta, session, full)
 
 
 def _stored_metadata(row):
@@ -593,6 +678,30 @@ def _stored_metadata(row):
         session_id=row["session_id"], agent=row["agent"], source_path=row["path"],
         workspace=row["workspace"], title=row["title"],
         started_at=row["started_at"], ended_at=row["ended_at"], model=row["model"])
+
+
+def _stored_full(conn: sqlite3.Connection, row) -> dict | None:
+    """load_session_file's dict as stored for row, or None when the parse was None.
+
+    Parsers always set agent to their slug and source_path to the path
+    they parsed, so those come from the row; verify compares the whole dict.
+    """
+    tree = row["agent"] == TREE_AGENT
+    prefix, table, rowids = (("t_", "tree_messages", "t_first_rowid") if tree
+                             else ("s_", "messages", "first_rowid"))
+    if row[prefix + "session_id"] is None:  # parsers always set a session_id
+        return None
+    messages = []
+    if row[rowids] is not None:
+        messages = [base.NormalizedMessage(*values) for values in conn.execute(
+            "SELECT idx, role, content, author, created_at, branch, uuid, parent_uuid"
+            f" FROM {table} WHERE rowid BETWEEN ? AND ? ORDER BY rowid",
+            (row[rowids], row[rowids.replace("first", "last")]))]
+    return fs_store._session_to_dict(base.NormalizedSession(
+        session_id=row[prefix + "session_id"], agent=row["agent"], source_path=row["path"],
+        workspace=row[prefix + "workspace"], title=row[prefix + "title"],
+        started_at=row[prefix + "started_at"], ended_at=row[prefix + "ended_at"],
+        model=row[prefix + "model"], messages=messages))
 
 
 def _stored_session(conn: sqlite3.Connection, row, match: tuple[str, str], rowids: list[int]):
