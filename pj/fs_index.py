@@ -194,8 +194,13 @@ def _delete_files(conn: sqlite3.Connection, file_ids: list[int]) -> None:
 
 def _index_file(conn: sqlite3.Connection, path: str, parser, pos: int,
                 st: os.stat_result) -> None:
-    meta = parser.parse_metadata(path)
-    session = parser.parse_session(path)
+    _insert_file(conn, path, parser, pos, st,
+                 parser.parse_metadata(path), parser.parse_session(path))
+
+
+def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
+                 st: os.stat_result, meta, session) -> None:
+    """Store one file's parse results; st must be taken before parsing."""
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
         " session_id, workspace, title, started_at, ended_at, activity_ms,"
