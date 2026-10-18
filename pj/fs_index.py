@@ -11,6 +11,7 @@ calls still delegate to fs_store.
 """
 from __future__ import annotations
 
+import bisect
 import fcntl
 import functools
 import os
@@ -474,7 +475,8 @@ def _clean_row(row, parser, st: _Sig | None):
 def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str) -> list[dict]:
     listed = _listed(_indexed_rows(conn))
     _check_dirty_bound(listed)
-    hits = _matching_messages(conn, query)
+    match = _match_clause(conn, query)
+    rowids = _matching_rowids(conn, match)
     parsed: dict = {}
     candidates = []
     for path, parser, row, dirty in listed:
@@ -484,7 +486,7 @@ def _search_content(conn: sqlite3.Connection, query: str, limit: int, sort: str)
                                functools.partial(_parse_and_keep, dirty, meta, parsed)))
         else:
             candidates.append((row["activity_ms"],
-                               functools.partial(_stored_session, row, hits)))
+                               functools.partial(_stored_session, conn, row, match, rowids)))
     results = fs_store.search_candidates(candidates, query, limit=limit, sort=sort)
     # Reached only when the search finished: a parse that raised (even a
     # BaseException) skips write-back entirely.
@@ -577,31 +579,48 @@ def _stored_metadata(row):
         started_at=row["started_at"], ended_at=row["ended_at"], model=row["model"])
 
 
-def _stored_session(row, hits: dict):
+def _stored_session(conn: sqlite3.Connection, row, match: tuple[str, str], rowids: list[int]):
     """The stored session with only its candidate messages, or None if none match.
 
     Messages that cannot match count 0 in fs_store's loop, so leaving them
     out changes nothing; fs_store's own matching rechecks the rest.
+    search_candidates calls this lazily, so message text is read only for
+    the files its loop reaches before it stops at the limit.
     """
-    messages = hits.get(row["id"])
-    if not messages:
+    if not _has_match(row, rowids):
         return None
+    messages = _matching_messages(conn, row, match)
     return base.NormalizedSession(
         session_id=row["s_session_id"], agent=row["agent"], source_path=row["path"],
         workspace=row["s_workspace"], title=row["s_title"],
         started_at=row["s_started_at"], ended_at=row["s_ended_at"], messages=messages)
 
 
-def _matching_messages(conn: sqlite3.Connection, query: str) -> dict:
-    """{file_id: [NormalizedMessage in order]}: a superset of the messages that match."""
-    where, arg = _match_clause(conn, query)
-    hits: dict = {}
-    for file_id, ord_, role, content in conn.execute(
-            f"SELECT file_id, ord, role, content FROM messages WHERE {where}", (arg,)):
-        hits.setdefault(file_id, []).append(base.NormalizedMessage(idx=ord_, role=role, content=content))
-    for messages in hits.values():
-        messages.sort(key=lambda m: m.idx)
-    return hits
+def _matching_rowids(conn: sqlite3.Connection, match: tuple[str, str]) -> list[int]:
+    """Sorted rowids of a superset of the messages that match.
+
+    Only rowids: reading file_id (UNINDEXED) or content would read every
+    matching message's whole record. _has_match maps them to files.
+    """
+    where, arg = match
+    return sorted(r for (r,) in conn.execute(f"SELECT rowid FROM messages WHERE {where}", (arg,)))
+
+
+def _has_match(row, rowids: list[int]) -> bool:
+    """True when some matching rowid lies in row's [first_rowid, last_rowid]."""
+    if row["first_rowid"] is None:
+        return False
+    i = bisect.bisect_left(rowids, row["first_rowid"])
+    return i < len(rowids) and rowids[i] <= row["last_rowid"]
+
+
+def _matching_messages(conn: sqlite3.Connection, row, match: tuple[str, str]) -> list:
+    """[NormalizedMessage in order]: row's messages that may match, by its rowid range."""
+    where, arg = match
+    return [base.NormalizedMessage(idx=ord_, role=role, content=content)
+            for ord_, role, content in conn.execute(
+                "SELECT ord, role, content FROM messages WHERE rowid BETWEEN ? AND ?"
+                f" AND {where} ORDER BY ord", (row["first_rowid"], row["last_rowid"], arg))]
 
 
 def _match_clause(conn: sqlite3.Connection, query: str) -> tuple[str, str]:

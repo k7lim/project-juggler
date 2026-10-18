@@ -782,3 +782,35 @@ def test_files_store_the_metadata_model(corpus, fs_index):
     for row_path, row in rows.items():
         parser = codex if "/.codex/" in row_path else claude_code
         assert fs_index._stored_metadata(row) == parser.parse_metadata(row_path), row_path
+
+
+@pytest.mark.parametrize("sort", ["newest", "oldest", "relevance"])
+@pytest.mark.parametrize("query", ["lazyterm", "lazytermi"])  # MATCH and exact pj_count paths
+def test_message_text_is_read_only_for_files_the_search_reaches(corpus, fs_index, monkeypatch,
+                                                                query, sort):
+    for day in range(10, 18):
+        claude_session(corpus, "lazy", f"z{day}", day, [("user", "no match here"),
+                                                         ("assistant", f"lazytermi {day}")])
+    fs_index.refresh()
+    expected = fs_store.search_content(query, limit=3, sort=sort)
+    reached, read = [], []
+    real_session, real_messages = fs_index._stored_session, fs_index._matching_messages
+
+    def stored_session(conn, row, *args):
+        reached.append(row["id"])
+        return real_session(conn, row, *args)
+
+    def matching_messages(conn, row, *args):
+        read.append(row["id"])
+        return real_messages(conn, row, *args)
+    monkeypatch.setattr(fs_index, "_stored_session", stored_session)
+    monkeypatch.setattr(fs_index, "_matching_messages", matching_messages)
+    statements = _trace_sql(monkeypatch)
+    _forbid_parsing(monkeypatch)
+    assert fs_index.search_content(query, limit=3, sort=sort) == expected
+    # 8 files match. newest/oldest stop after 3 results; relevance reaches every file.
+    assert len(expected) == 3
+    assert len(read) == len(set(read)) == (8 if sort == "relevance" else 3)
+    assert set(read) <= set(reached)
+    reads = [s for s in statements if "content FROM messages" in s]  # selects message text
+    assert len(reads) == len(read) and all("rowid BETWEEN" in s for s in reads), reads
