@@ -327,7 +327,7 @@ def _with_index(search, fallback):
     conn = _open_current(paths.index_path())
     if conn is None:
         return _fall_back(fallback, "index missing, corrupt or outdated;"
-                                    " run fs_index.refresh()")
+                                    " run `pj index refresh`")
     try:
         try:
             return search(conn)

@@ -182,7 +182,9 @@ def test_corrupt_index_falls_back_to_fs_results(corpus, fs_index, monkeypatch, c
     paths.index_path().write_bytes(b"not a database")
     assert_same_as_fs(fs_index, "needle")
     assert_same_as_fs(fs_index, "alpha")
-    assert capsys.readouterr().err.count("session index unavailable") == 1  # once per process
+    err = capsys.readouterr().err
+    assert err.count("session index unavailable") == 1  # once per process
+    assert "run `pj index refresh`" in err
 
 
 def _forbid_parsing(monkeypatch):
