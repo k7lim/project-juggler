@@ -904,6 +904,7 @@ def _metadata_results(store):
         "sessions_by_project": store.sessions_by_project(META_WS),
         "project_sessions": store.project_sessions("/w/alpha"),
         "project_sessions_limit": store.project_sessions("/w/gamma", limit=1),
+        "overview": store.session_overview(),
     }
 
 
@@ -920,6 +921,13 @@ def test_meta_fixture_exercises_fs_store_metadata(meta_corpus):
     assert [s["session_id"] for s in r["project_sessions_limit"]] == ["x7"]
     assert "/w/missing" not in r["sessions_by_project"]
     assert r["sessions_by_project"]["/w/alpha"][0]["source_path"] == _path(meta_corpus, M1)
+    overview = r["overview"]
+    assert set(overview["by_agent"]) >= {"claude_code", "codex", "kimi"}
+    assert sum(a["sessions"] for a in overview["by_agent"].values()) == \
+        sum(p["session_count"] for p in r["list_projects"])
+    assert overview["workspaces"] == {
+        p["path"]: {"sessions": p["session_count"], "newest": p["last_active"]}
+        for p in r["list_projects"]}
 
 
 def test_metadata_calls_match_fs_store_exactly(meta_corpus, fs_index):

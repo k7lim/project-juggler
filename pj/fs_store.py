@@ -183,6 +183,34 @@ def group_projects(metas, detail: bool = False) -> list[dict]:
     return sorted(grouped.values(), key=lambda p: p["last_active"] or "", reverse=True)
 
 
+def session_overview() -> dict:
+    """Session count and newest activity per agent and per workspace.
+
+    Returns {"by_agent": {agent: {"sessions": int, "newest": str|None}},
+             "workspaces": {path: {"sessions": int, "newest": str|None}}}
+    with "newest" as list_projects' last_active (ISO8601). Not part of
+    SessionStore: only the fs backends provide it.
+    """
+    return overview_of(_listed_metadata())
+
+
+def overview_of(metas) -> dict:
+    """session_overview over metadata (NormalizedSession or None) in list_sessions order."""
+    by_agent: dict[str, dict] = {}
+    workspaces: dict[str, dict] = {}
+    for s in metas:
+        if not s:
+            continue
+        active_at = s.ended_at or s.started_at
+        newest = _iso_from_ms(active_at) if active_at else None
+        for key, groups in ((s.agent, by_agent), (s.workspace or "(no workspace)", workspaces)):
+            g = groups.setdefault(key, {"sessions": 0, "newest": None})
+            g["sessions"] += 1
+            if newest and (g["newest"] is None or newest > g["newest"]):
+                g["newest"] = newest
+    return {"by_agent": by_agent, "workspaces": workspaces}
+
+
 def recent_session_counts(days: int = 7) -> dict[str, int]:
     return count_recent(_listed_metadata(), days=days)
 

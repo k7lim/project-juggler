@@ -824,6 +824,12 @@ def list_projects(detail: bool = False) -> list[dict]:
         lambda: fs_store.list_projects(detail=detail))
 
 
+def session_overview() -> dict:
+    return _with_index(
+        lambda conn: fs_store.overview_of(_metadata(conn)),
+        fs_store.session_overview)
+
+
 def recent_session_counts(days: int = 7) -> dict[str, int]:
     return _with_index(
         lambda conn: fs_store.count_recent(_metadata(conn), days=days),
