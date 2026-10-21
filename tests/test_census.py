@@ -881,3 +881,36 @@ def test_cli_census_status_outputs_structured_json(capsys):
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is True
     assert parsed["data"] == status
+
+
+def _readme_get_endpoints() -> list[str]:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    paths = []
+    for line in readme.splitlines():
+        if line.startswith("| `GET /api/"):
+            endpoint = line.split("`")[1].removeprefix("GET ")
+            paths.append(endpoint.split("?")[0])
+    return paths
+
+
+def test_readme_does_not_advertise_unrouted_api_ports():
+    # pj-55m.3 decision: /api/ports is deferred; port data is census enrichment only.
+    documented = _readme_get_endpoints()
+    assert "/api/census" in documented
+    assert "/api/ports" not in documented
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "GET /api/census?include_ports=1" in readme
+
+    server, thread = _test_server()
+    try:
+        status, _ = _api_request(server, "/api/census?include_ports=0")
+        assert status == 200
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/ports", timeout=5)
+            raise AssertionError("/api/ports should not be routed")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
