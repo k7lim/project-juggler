@@ -76,6 +76,65 @@ def test_late_auxiliary_record_does_not_select_an_old_branch(tmp_path):
     assert [m.uuid for m in session.messages] == ["question", "new-answer"]
 
 
+def test_late_tool_result_does_not_hide_a_newer_assistant_continuation(tmp_path):
+    path = write_session(tmp_path, [
+        event("question", None, "user", "Question"),
+        event("call", "question", "assistant", [
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+        ]),
+        event("answer", "call", "assistant", "Latest answer"),
+        event("late-result", "call", "user", [
+            {"type": "tool_result", "tool_use_id": "a", "content": "late result"},
+        ]),
+    ])
+    session = claude_code.parse_session_tree(path, include_tools=False)
+    assert [m.uuid for m in session.messages] == ["question", "answer"]
+    full = claude_code.parse_session_tree(path, all_branches=True)
+    assert [(m.uuid, m.branch) for m in full.messages][-2:] == [
+        ("answer", "active"), ("late-result", "abandoned"),
+    ]
+
+
+def test_late_tool_result_does_not_hide_an_edited_user_turn(tmp_path):
+    path = write_session(tmp_path, [
+        event("question", None, "user", "Question"),
+        event("call", "question", "assistant", [
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+        ]),
+        event("edit", "question", "user", "Changed question"),
+        event("late-result", "call", "user", [
+            {"type": "tool_result", "tool_use_id": "a", "content": "late result"},
+        ]),
+    ])
+    session = claude_code.parse_session_tree(path)
+    assert [m.uuid for m in session.messages] == ["question", "edit"]
+
+
+def test_latest_tool_result_descendant_is_kept_at_an_unfinished_turn(tmp_path):
+    path = write_session(tmp_path, [
+        event("question", None, "user", "Question"),
+        event("call", "question", "assistant", [
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+        ]),
+        event("result", "call", "user", [
+            {"type": "tool_result", "tool_use_id": "a", "content": "result"},
+        ]),
+        event("attachment", "result", "attachment", ""),
+    ])
+    session = claude_code.parse_session_tree(path)
+    assert [m.uuid for m in session.messages] == ["question", "call", "result"]
+
+
+def test_fragment_containing_only_tool_results_is_readable(tmp_path):
+    path = write_session(tmp_path, [
+        event("result", "missing-call", "user", [
+            {"type": "tool_result", "tool_use_id": "a", "content": "result"},
+        ]),
+    ])
+    session = claude_code.parse_session_tree(path)
+    assert [m.uuid for m in session.messages] == ["result"]
+
+
 @pytest.mark.parametrize("parent", [None, "unavailable-parent"])
 def test_newest_conversation_can_start_a_disconnected_root(tmp_path, parent):
     path = write_session(tmp_path, [
