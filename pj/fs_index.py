@@ -30,7 +30,9 @@ from typing import NamedTuple
 from . import fs_store, paths
 from .parsers import base
 
-SCHEMA_VERSION = "3"
+# v4 invalidates Claude tree rows selected by v3's greedy child walk.
+# The table layout is unchanged; the stored parser results are not.
+SCHEMA_VERSION = "4"
 
 _SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);

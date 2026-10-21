@@ -339,8 +339,10 @@ def parse_session_tree(
 ) -> NormalizedSession | None:
     """Parse a session with tree-aware fork handling.
 
-    Walks the uuid/parentUuid DAG to find the active branch (last child at
-    each fork).  Returns only active-branch messages by default;
+    Walks backward from the last user/assistant record in file order to
+    find the active branch. Parallel tool results can create sibling
+    branches whose immediate write order does not identify the latest
+    continuation. Returns only active-branch messages by default;
     ``all_branches=True`` includes abandoned forks annotated with
     ``branch="abandoned"``.
     """
@@ -358,11 +360,9 @@ def parse_session_tree(
 
     # First pass: parse all lines into node dicts keyed by uuid
     nodes: dict[str, dict] = {}  # uuid -> node info
-    children: dict[str, list[str]] = {}  # parent_uuid -> [child uuids]
     ordered_uuids: list[str] = []  # file order
     session_id = None
     model = None
-    root_uuid = None
 
     for line_idx, line in enumerate(lines):
         try:
@@ -404,29 +404,20 @@ def parse_session_tree(
         }
         ordered_uuids.append(uuid)
 
-        if parent:
-            children.setdefault(parent, []).append(uuid)
-        else:
-            if root_uuid is None:
-                root_uuid = uuid
-
     if not nodes:
         return None
 
-    # Find root (first node without parent)
-    if root_uuid is None:
-        root_uuid = ordered_uuids[0]
-
-    # Walk tree to find active tip: at each node, pick the last child (by file order)
-    active_tip = root_uuid
-    while active_tip in children:
-        kids = children[active_tip]
-        active_tip = kids[-1]  # last child = most recently written
+    # Auxiliary records may arrive after a conversation has continued on
+    # another branch. They connect ancestry but must not choose its tip.
+    # Choose before filtering roles/tools so output options cannot change
+    # which conversation is active.
+    active_tip = next((uuid for uuid in reversed(ordered_uuids)
+                       if nodes[uuid]["type"] in ("user", "assistant")), None)
 
     # Walk backward from tip to root to build the active set
     active_uuids: set[str] = set()
     cursor = active_tip
-    while cursor:
+    while cursor and cursor not in active_uuids:
         active_uuids.add(cursor)
         node = nodes.get(cursor)
         cursor = node["parent_uuid"] if node else None

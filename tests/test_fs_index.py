@@ -1040,6 +1040,36 @@ def test_v2_index_is_outdated_and_rebuilt(corpus, fs_index, monkeypatch, capsys)
     _assert_index_is_used(fs_index, monkeypatch)
 
 
+def test_v3_tree_index_is_invalidated_after_branch_selection_fix(corpus, fs_index, monkeypatch):
+    from pj import paths
+    from tests.test_claude_tree import event
+
+    path = str(_write(sessions_home(corpus) / B1, [
+        event("question", None, "user", "Question"),
+        event("continuation", "question", "assistant", "First reply"),
+        event("sibling", "question", "user", [
+            {"type": "tool_result", "tool_use_id": "a", "content": "result"},
+        ]),
+        event("answer", "continuation", "assistant", "Latest reply"),
+    ]))
+    expected = fs_store.load_session_file(path, "claude_code")
+    assert [m["uuid"] for m in expected["messages"]] == [
+        "question", "continuation", "answer",
+    ]
+    fs_index.refresh()
+    # Version 3 cached an earlier branch even though the source file is clean.
+    with sqlite3.connect(str(paths.index_path())) as conn:
+        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("UPDATE tree_messages SET content = 'stale branch'")
+    conn.close()
+
+    assert fs_index.status()["schema_matches"] is False
+    assert fs_index.load_session_file(path, "claude_code") == expected
+    assert fs_index.refresh()["rebuilt"] is True
+    _forbid_parsing(monkeypatch)
+    assert fs_index.load_session_file(path, "claude_code") == expected
+
+
 def test_verify_repairs_a_tampered_tree_row(corpus, fs_index):
     branched_session(corpus)
     fs_index.refresh()
