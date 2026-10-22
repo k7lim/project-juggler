@@ -339,8 +339,10 @@ def parse_session_tree(
 ) -> NormalizedSession | None:
     """Parse a session with tree-aware fork handling.
 
-    Walks the uuid/parentUuid DAG to find the active branch (last child at
-    each fork).  Returns only active-branch messages by default;
+    Infers the active branch from the latest assistant or non-tool-result
+    user record, including any later tool results on that ancestry.
+    Parallel results on older sibling branches cannot select the active
+    continuation. Returns only active-branch messages by default;
     ``all_branches=True`` includes abandoned forks annotated with
     ``branch="abandoned"``.
     """
@@ -358,11 +360,10 @@ def parse_session_tree(
 
     # First pass: parse all lines into node dicts keyed by uuid
     nodes: dict[str, dict] = {}  # uuid -> node info
-    children: dict[str, list[str]] = {}  # parent_uuid -> [child uuids]
+    children: dict[str, list[str]] = {}
     ordered_uuids: list[str] = []  # file order
     session_id = None
     model = None
-    root_uuid = None
 
     for line_idx, line in enumerate(lines):
         try:
@@ -392,41 +393,63 @@ def parse_session_tree(
         if msg_model:
             model = msg_model
 
+        content = msg.get("content", "")
         nodes[uuid] = {
             "uuid": uuid,
             "parent_uuid": parent,
             "line_idx": line_idx,
             "type": msg_type,
             "role": role,
-            "content_raw": msg.get("content", ""),
+            "content_raw": content,
+            "tool_result_only": (
+                msg_type == "user" and isinstance(content, list) and bool(content)
+                and all(isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in content)
+            ),
             "author": msg_model,
             "timestamp": obj.get("timestamp"),
         }
         ordered_uuids.append(uuid)
-
         if parent:
             children.setdefault(parent, []).append(uuid)
-        else:
-            if root_uuid is None:
-                root_uuid = uuid
 
     if not nodes:
         return None
 
-    # Find root (first node without parent)
-    if root_uuid is None:
-        root_uuid = ordered_uuids[0]
+    # Tool results and auxiliary records may arrive after a conversation
+    # continued on another branch. Only a conversational turn anchors it.
+    # Choose before filtering roles/tools so output options cannot change
+    # which conversation is active.
+    active_tip = None
+    for uuid in reversed(ordered_uuids):
+        node = nodes[uuid]
+        if node["type"] not in ("user", "assistant"):
+            continue
+        if active_tip is None:  # A partial log may contain only tool results.
+            active_tip = uuid
+        if not node["tool_result_only"]:
+            active_tip = uuid
+            break
 
-    # Walk tree to find active tip: at each node, pick the last child (by file order)
-    active_tip = root_uuid
-    while active_tip in children:
-        kids = children[active_tip]
-        active_tip = kids[-1]  # last child = most recently written
+    # Keep unfinished turns' results, but only descendants of that anchor.
+    # Visit each node once; a long parallel batch must not become quadratic.
+    pending = [active_tip] if active_tip is not None else []
+    descendants: set[str] = set()
+    while pending:
+        uuid = pending.pop()
+        if uuid in descendants:
+            continue
+        descendants.add(uuid)
+        node = nodes[uuid]
+        if (node["type"] in ("user", "assistant")
+                and node["line_idx"] > nodes[active_tip]["line_idx"]):
+            active_tip = uuid
+        pending.extend(children.get(uuid, ()))
 
     # Walk backward from tip to root to build the active set
     active_uuids: set[str] = set()
     cursor = active_tip
-    while cursor:
+    while cursor and cursor not in active_uuids:
         active_uuids.add(cursor)
         node = nodes.get(cursor)
         cursor = node["parent_uuid"] if node else None

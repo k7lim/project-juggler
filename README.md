@@ -410,6 +410,19 @@ Lists the session IDs and titles for a project. With no project argument,
 `pj chats` infers the project from the current working directory; `pj chat list`
 is an alias for the same listing command.
 
+### `pj chat` — Read a conversation
+
+```bash
+pj chat <session-id> --last 20 --no-tools
+pj chat <session-id> --all-branches --pretty
+```
+
+For Claude sessions, the default view infers active ancestry from the latest
+assistant or ordinary user turn and its later tool-result descendants. Parallel
+tool results on sibling branches are outside that view. Use `--all-branches`
+to inspect them along with replaced conversation forks; the existing
+`branch: "abandoned"` label means a record is outside the selected ancestry.
+
 ### `pj resume` — Jump back in
 
 ```bash
