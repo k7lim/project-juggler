@@ -161,14 +161,14 @@ project already holding 8765 does not block the dashboard; the chosen port is in
 the `url`/`port` fields of `start` and `status`. Pass `--port` to pin a specific
 port — a pinned port that is busy is reported as an error rather than moved.
 
-### `pj index` - Opt-in session index
+### `pj index` - Session index
 
-The default `fs` backend re-reads every session file on each search. That
+The explicit `PJ_BACKEND=fs` backend re-reads every session file on each search. That
 breaks down as history grows: at 8.3 GB / ~6.7k session files, content search
 takes 18-61 s and a `--project` search ~28-32 s. The SQLite index answers the
 same searches in 0.5-0.7 s with identical results.
 
-Opt in with `PJ_BACKEND=index`, then build and inspect it:
+The default backend uses an existing index, with filesystem fallback. Build and inspect it:
 
 ```bash
 pj index refresh             # Build or update the index; JSON added/updated/removed/rebuilt/seconds
@@ -506,7 +506,7 @@ session-store locations, use `PJ_SOURCES` below.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PJ_BACKEND` | `fs` | `index` for the opt-in session index (see `pj index`); `cass` for the CASS SQLite backend |
+| `PJ_BACKEND` | `index` | `fs` for direct scans; `index` for the session index (see `pj index`); `cass` for the CASS SQLite backend |
 | `PJ_SOURCES` | auto-detected | Extra session roots. Format: `agent:path:agent:path` |
 | `PJ_DATA_DIR` | `~/.local/share/pj` | Where annotations and cache live |
 | `PJ_CASS_DBS` | auto-detected | Colon-separated CASS database paths |

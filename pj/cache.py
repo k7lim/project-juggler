@@ -58,6 +58,10 @@ def load() -> list[dict] | None:
 
 def save(projects: list[dict]) -> None:
     cd = cache_dir()
-    cd.mkdir(parents=True, exist_ok=True)
-    with open(cd / "project_index.json", "w") as f:
-        json.dump({"signatures": _signatures(), "projects": projects}, f)
+    try:
+        cd.mkdir(parents=True, exist_ok=True)
+        with open(cd / "project_index.json", "w") as f:
+            json.dump({"signatures": _signatures(), "projects": projects}, f)
+    except OSError:
+        # This is a disposable optimization; reads must work on read-only hosts.
+        return

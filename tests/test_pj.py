@@ -2796,16 +2796,16 @@ def test_store_swap_schedule_uses_new_backend():
         session_store._store = old_store
 
 
-def test_store_default_is_fs():
-    """Default store is fs_store (PJ_BACKEND unset)."""
-    import pj.fs_store as fs_store_mod
+def test_store_default_is_index():
+    """Default store uses the index (PJ_BACKEND unset)."""
+    import pj.fs_index as fs_index_mod
     old_store = session_store._store
     try:
         session_store._store = None  # reset
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PJ_BACKEND", None)
             store = session_store.get_store()
-        assert store is fs_store_mod
+        assert store is fs_index_mod
     finally:
         session_store._store = old_store
 
