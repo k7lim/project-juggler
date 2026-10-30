@@ -8,6 +8,8 @@ AGENT_RESUME_TEMPLATES: dict[str, str] = {
     "claude": "claude --resume {session_id}",
     "claude_code": "claude --resume {session_id}",
     "codex": "codex resume {session_id}",
+    "pi": "pi --session {session_id}",
+    "pi-raw": "pi-raw --session {session_id}",
     "opencode": "opencode --resume {session_id}",
     "amp": "amp --resume {session_id}",
     "hermes": "hermes --resume {session_id}",

@@ -14,10 +14,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .parsers import base
-from .parsers import claude_code, codex, kimi
+from .parsers import claude_code, codex, kimi, pi
 
 # Registry of available parsers
-_PARSERS = [claude_code, codex, kimi]
+_PARSERS = [claude_code, codex, kimi, pi]
 
 
 def _configured_roots() -> list[tuple[str, object]]:
@@ -42,6 +42,7 @@ def _configured_roots() -> list[tuple[str, object]]:
         slug_to_parser = {p.agent_slug: p for p in _PARSERS}
         # Accept short aliases
         slug_to_parser.setdefault("claude", slug_to_parser.get("claude_code"))  # type: ignore[arg-type]
+        slug_to_parser["pi-raw"] = pi
         for i in range(0, len(parts) - 1, 2):
             agent_name = parts[i].strip()
             path = parts[i + 1].strip()
@@ -60,6 +61,7 @@ def _configured_roots() -> list[tuple[str, object]]:
     for relative, parser in (
         (".claude/projects", claude_code),
         (".codex/sessions", codex),
+        (".pi/agent/sessions", pi),
     ):
         _add(str(sandbox_home / relative), parser)
 

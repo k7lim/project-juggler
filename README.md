@@ -453,6 +453,7 @@ Notes starting with `blocked:` mark the project as blocked and exclude it from `
 - `~/.claude-*/projects/` — alternate Claude installs
 - `~/.codex/sessions/` — Codex
 - `~/.kimi/sessions/` — Kimi CLI
+- `~/.pi/agent/sessions/` — Pi (including native `pi-raw` launches)
 
 **CASS store** (watched provider): if you have a CASS database, set `PJ_BACKEND=cass` to read its normalized index. CASS stays behind `pj/cass_facade.py`; if it becomes richer than direct file scans for project metadata, snippets, token analytics, or multi-agent coverage, `pj` can prefer it without changing CLI output.
 
@@ -476,12 +477,13 @@ Every command outputs JSON by default (for piping to `jq` or agents). Add `--pre
 
 ## Supported agents
 
-Session parsing is implemented for Claude Code and Codex. Resume commands are templated for 13 agents:
+Session parsing is implemented for Claude Code, Codex, Kimi, and Pi. Resume commands include:
 
 | Agent | Resume command |
 |-------|---------------|
 | Claude Code | `claude --resume <id>` |
 | Codex | `codex resume <id>` |
+| Pi | `pi --session <id>` |
 | AMP | `amp --resume <id>` |
 | Aider | `aider --resume <id>` |
 | Cursor | `cursor --resume <id>` |
@@ -497,12 +499,20 @@ To add a new agent: create a parser in `pj/parsers/` and add a resume template i
 
 ## Environment variables
 
-The default filesystem backend also discovers Claude Code and Codex sessions in
-`~/.local/share/yolobox/home/.claude/projects` and
-`~/.local/share/yolobox/home/.codex/sessions`. These roots feed both CLI search
+The filesystem and indexed backends also discover Claude Code, Codex, and Pi sessions in
+`~/.local/share/yolobox/home/.claude/projects`,
+`~/.local/share/yolobox/home/.codex/sessions`, and
+`~/.local/share/yolobox/home/.pi/agent/sessions`. These roots feed both CLI search
 and the census dashboard. Missing directories are ignored; symlink aliases and
 explicit roots pointing to the same directory are scanned only once. For other
 session-store locations, use `PJ_SOURCES` below.
+
+Both `pi` and `pi-raw` use Pi's session format. The protected-workspace `pi`
+launcher redirects home to Yolobox; `pi-raw` uses the host home. Both locations
+are searched automatically as agent `pi`. For custom `--session-dir` locations,
+use `PJ_SOURCES=pi:/path/to/sessions` (`pi-raw` is also accepted as an alias).
+Pi search includes saved messages from all branches and before compaction,
+plus tool result text; thinking and image payloads are omitted.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -512,6 +522,8 @@ session-store locations, use `PJ_SOURCES` below.
 | `PJ_CASS_DBS` | auto-detected | Colon-separated CASS database paths |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory |
 | `CODEX_HOME` | `~/.codex` | Codex config directory |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Additional Pi config directory (sessions subdirectory) |
+| `PI_CODING_AGENT_SESSION_DIR` | unset | Additional Pi session storage directory |
 
 ## Using with agents
 
