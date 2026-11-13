@@ -21,6 +21,7 @@ import random
 import sqlite3
 import stat
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -446,6 +447,24 @@ def _fresh_messages(session) -> list:
 # stored rows for unchanged files and over a fresh parse for dirty ones.
 
 _warned = False  # the fallback warning is printed once per process
+_observers = threading.local()  # .stack: lists that observe_fallbacks() yielded
+
+
+@contextmanager
+def observe_fallbacks():
+    """Collect the reason for every fallback to fs_store in this thread.
+
+    Long-running callers (the yolobox query server) cannot rely on the
+    once-per-process stderr warning; this reports each fallback (pj-85c)."""
+    seen: list[str] = []
+    stack = getattr(_observers, "stack", None)
+    if stack is None:
+        stack = _observers.stack = []
+    stack.append(seen)
+    try:
+        yield seen
+    finally:
+        stack.remove(seen)
 
 # Above either bound the index is too stale to help: fs_store answers, so a
 # burst of new history cannot make one search slower than fs_store's.
@@ -476,6 +495,8 @@ def _with_index(search, fallback):
 
 def _fall_back(fallback, reason: str):
     global _warned
+    for seen in getattr(_observers, "stack", ()):
+        seen.append(reason)
     if not _warned:
         _warned = True
         print(f"pj: session index unavailable ({reason}); reading session files",

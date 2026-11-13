@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import time
 
@@ -417,6 +418,28 @@ def _cmd_resume(args: argparse.Namespace) -> None:
     print(cmd)
 
 
+@contextlib.contextmanager
+def _observed_source():
+    """Yield a dict that ends up as {"source": ...} plus "warning" on a fallback.
+
+    "index" means the session index answered; "fs" means session files were
+    read, either by choice (PJ_BACKEND=fs) or because the index could not
+    answer (pj-85c), which also sets "warning"."""
+    store = get_store()
+    observe = getattr(store, "observe_fallbacks", None)
+    out: dict = {}
+    if observe is None:
+        out["source"] = "cass" if getattr(store, "__name__", "").endswith("cass_facade") else "fs"
+        yield out
+        return
+    with observe() as seen:
+        yield out
+    out["source"] = "fs" if seen else "index"
+    if seen:
+        out["warning"] = (f"session index unavailable ({seen[0]}); "
+                          "reading session files")
+
+
 def _cmd_search(args: argparse.Namespace) -> None:
     if not args.query:
         _missing_arg("search")
@@ -436,14 +459,15 @@ def _cmd_search(args: argparse.Namespace) -> None:
         project_filter = current_project["path"]
 
     try:
-        results = search_mod.search(
-            args.query,
-            limit=args.limit,
-            sort=args.sort,
-            project=project_filter,
-            match=args.match,
-            regex=args.regex,
-        )
+        with _observed_source() as source:
+            results = search_mod.search(
+                args.query,
+                limit=args.limit,
+                sort=args.sort,
+                project=project_filter,
+                match=args.match,
+                regex=args.regex,
+            )
     except ValueError as exc:
         env = envelope.err(str(exc), source="search")
         print(envelope.to_json(env))
@@ -467,6 +491,7 @@ def _cmd_search(args: argparse.Namespace) -> None:
             sort=args.sort,
             total=len(results),
             latency_ms=latency_ms,
+            **source,
             **({"hint": hint} if hint else {}),
         )
         print(envelope.to_json(env))
