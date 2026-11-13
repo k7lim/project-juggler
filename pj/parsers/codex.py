@@ -70,6 +70,80 @@ def _parse_timestamp(ts) -> int | None:
     return None
 
 
+def _message_text(obj) -> str | None:
+    """The text parse_session keeps as a message for this event, else None."""
+    event_type = obj.get("type", "")
+    payload = obj.get("payload") or {}
+    if event_type == "response_item" and payload.get("role") in ("user", "assistant"):
+        content = _flatten_content(payload.get("content", ""))
+    elif event_type == "event_msg" and payload.get("type") == "user_message":
+        content = payload.get("message", "")
+    else:
+        return None
+    return content if isinstance(content, str) and content.strip() else None
+
+
+def _meta_timestamp(obj) -> int | None:
+    """session_meta's payload.timestamp: when the session started.  The line
+    timestamp can be later, when a resumed rollout rewrites the header."""
+    return _parse_timestamp((obj.get("payload") or {}).get("timestamp"))
+
+
+TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens",
+              "reasoning_output_tokens", "total_tokens")
+_TAIL_CHUNK = 64 * 1024
+_TAIL_LIMIT = 1024 * 1024  # stop looking for a token_count this far from the end
+
+
+def _total_token_usage(obj) -> dict | None:
+    payload = obj.get("payload") or {}
+    if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    usage = info.get("total_token_usage") if isinstance(info, dict) else None
+    if not isinstance(usage, dict):
+        return None  # info is null on rate-limit-only counts
+    return {k: usage[k] for k in TOKEN_KEYS if isinstance(usage.get(k), int)} or None
+
+
+def _last_token_usage(f, size: int) -> dict | None:
+    """total_token_usage of the last token_count with info: the session total.
+
+    Codex logs a request's token_count after the tool output that request
+    produced, so the last count can follow the last message, and a large tool
+    output can follow the last count.  Reads backwards in chunks."""
+    pos, buf = size, b""
+    while pos > 0 and size - pos < _TAIL_LIMIT:
+        step = min(_TAIL_CHUNK, pos)
+        pos -= step
+        f.seek(pos)
+        buf = f.read(step) + buf
+        lines = buf.split(b"\n")
+        buf, complete = (lines[0], lines[1:]) if pos > 0 else (b"", lines)
+        for line in reversed(complete):
+            if b'"token_count"' not in line:
+                continue
+            try:
+                usage = _total_token_usage(json.loads(line))
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                continue
+            if usage:
+                return usage
+    return None
+
+
+def _has_message(f) -> bool:
+    for line in f:
+        if b'"response_item"' not in line and b'"user_message"' not in line:
+            continue
+        try:
+            if _message_text(json.loads(line)) is not None:
+                return True
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+            continue
+    return False
+
+
 def _external_id(path: str, root: str) -> str:
     """Session ID from relative path without extension."""
     rel = os.path.relpath(path, root)
@@ -108,6 +182,9 @@ def parse_session(path: str) -> NormalizedSession | None:
             payload = obj.get("payload", {})
             session_id = payload.get("id")
             workspace = payload.get("cwd")
+            started = _meta_timestamp(obj)
+            if started:
+                timestamps.append(started)
             continue
 
         if event_type == "turn_context":
@@ -186,11 +263,13 @@ def parse_metadata(path: str) -> NormalizedSession | None:
     try:
         with open(path) as f:
             head_lines = [next(f, "").strip() for _ in range(30)]
+            whole_file_read = next(f, None) is None
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             f.seek(max(0, size - 8192))
             tail_lines = f.read().decode("utf-8", errors="replace").splitlines()[-5:]
+            tokens = _last_token_usage(f, size)
     except OSError:
         return None
 
@@ -203,6 +282,7 @@ def parse_metadata(path: str) -> NormalizedSession | None:
     model = None
     title = None
     timestamps = []
+    has_message = False
 
     for line in head_lines:
         if not line:
@@ -217,10 +297,14 @@ def parse_metadata(path: str) -> NormalizedSession | None:
         if ts:
             timestamps.append(ts)
 
+        has_message = has_message or _message_text(obj) is not None
         if event_type == "session_meta":
             payload = obj.get("payload", {})
             session_id = payload.get("id")
             workspace = payload.get("cwd")
+            started = _meta_timestamp(obj)
+            if started:
+                timestamps.append(started)
         elif event_type == "turn_context":
             payload = obj.get("payload", {})
             if payload.get("cwd"):
@@ -246,6 +330,18 @@ def parse_metadata(path: str) -> NormalizedSession | None:
         ts = _parse_timestamp(obj.get("timestamp"))
         if ts:
             timestamps.append(ts)
+        has_message = has_message or _message_text(obj) is not None
+
+    # parse_session returns None without messages; list exactly what opens.
+    if not has_message and whole_file_read:
+        return None
+    if not has_message:
+        try:
+            with open(path, "rb") as f:
+                if not _has_message(f):
+                    return None
+        except OSError:
+            return None
 
     session_id = session_id or os.path.splitext(os.path.basename(path))[0]
 
@@ -259,4 +355,5 @@ def parse_metadata(path: str) -> NormalizedSession | None:
         ended_at=max(timestamps) if timestamps else None,
         model=model,
         messages=[],
+        tokens=tokens,
     )

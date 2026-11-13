@@ -240,6 +240,7 @@ def _session_summary(meta: base.NormalizedSession) -> dict:
     duration_secs = None
     if meta.started_at and meta.ended_at:
         duration_secs = (meta.ended_at - meta.started_at) / 1000.0
+    tokens = meta.tokens or {}
     return {
         "session_id": meta.session_id,
         "agent": meta.agent,
@@ -248,11 +249,11 @@ def _session_summary(meta: base.NormalizedSession) -> dict:
         "ended_at": _iso_from_ms(meta.ended_at) if meta.ended_at else None,
         "model": meta.model,
         "duration_secs": duration_secs,
-        "input_tokens": None,
-        "output_tokens": None,
-        "cache_read_tokens": None,
+        "input_tokens": tokens.get("input_tokens"),
+        "output_tokens": tokens.get("output_tokens"),
+        "cache_read_tokens": tokens.get("cached_input_tokens"),
         "cache_creation_tokens": None,
-        "total_tokens": None,
+        "total_tokens": tokens.get("total_tokens"),
         "user_messages": None,
         "assistant_messages": None,
         "tool_calls": None,

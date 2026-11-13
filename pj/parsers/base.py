@@ -28,6 +28,8 @@ class NormalizedSession:
     ended_at: int | None = None  # ms since epoch
     model: str | None = None
     messages: list[NormalizedMessage] = field(default_factory=list)
+    # Session token totals (codex: TOKEN_KEYS from the last token_count), if known.
+    tokens: dict | None = None
 
 
 class AgentParser(Protocol):
