@@ -30,6 +30,8 @@ class NormalizedSession:
     messages: list[NormalizedMessage] = field(default_factory=list)
     # Session token totals (codex: TOKEN_KEYS from the last token_count), if known.
     tokens: dict | None = None
+    # Message, tool-call and request counts (codex: COUNT_KEYS), if known.
+    counts: dict | None = None
 
 
 class AgentParser(Protocol):

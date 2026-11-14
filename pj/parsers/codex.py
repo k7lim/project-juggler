@@ -132,6 +132,50 @@ def _last_token_usage(f, size: int) -> dict | None:
     return None
 
 
+COUNT_KEYS = ("user_messages", "assistant_messages", "tool_calls", "api_calls")
+_TOOL_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call",
+                    "web_search_call", "tool_search_call"}
+# Codex sends these as role=user messages; they are context, not prompts.
+_INJECTED_PREFIXES = ("<environment_context>", "<user_instructions>", "# AGENTS.md",
+                      "<turn_aborted>", "<subagent_notification>", "<user_shell_command>")
+
+
+def _counts(f) -> dict:
+    """COUNT_KEYS over the whole rollout.  A request is a token_count with info;
+    user_messages are typed prompts (response_item role=user, minus injected
+    context).  Decodes only lines that can matter: about 5 ms per MB."""
+    counts = dict.fromkeys(COUNT_KEYS, 0)
+    for line in f:
+        is_count = b'"token_count"' in line
+        if not is_count and b'"response_item"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        payload = obj.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if obj.get("type") == "event_msg":
+            if payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
+                counts["api_calls"] += 1
+        elif obj.get("type") == "response_item":
+            kind = payload.get("type")
+            if kind in _TOOL_CALL_TYPES:
+                counts["tool_calls"] += 1
+            elif kind == "message":
+                text = _flatten_content(payload.get("content", "")).lstrip()
+                if not text:
+                    continue
+                if payload.get("role") == "assistant":
+                    counts["assistant_messages"] += 1
+                elif payload.get("role") == "user" and not text.startswith(_INJECTED_PREFIXES):
+                    counts["user_messages"] += 1
+    return counts
+
+
 def _has_message(f) -> bool:
     for line in f:
         if b'"response_item"' not in line and b'"user_message"' not in line:
@@ -270,6 +314,8 @@ def parse_metadata(path: str) -> NormalizedSession | None:
             f.seek(max(0, size - 8192))
             tail_lines = f.read().decode("utf-8", errors="replace").splitlines()[-5:]
             tokens = _last_token_usage(f, size)
+            f.seek(0)
+            counts = _counts(f)
     except OSError:
         return None
 
@@ -356,4 +402,5 @@ def parse_metadata(path: str) -> NormalizedSession | None:
         model=model,
         messages=[],
         tokens=tokens,
+        counts=counts,
     )

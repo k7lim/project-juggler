@@ -35,7 +35,8 @@ from .parsers import base
 # v4 invalidates Claude tree rows selected by v3's greedy child walk.
 # v5 adds files.tokens and drops codex rollouts without messages from the
 # stored metadata (pj-6tr, pj-tej).
-SCHEMA_VERSION = "5"
+# v6 adds files.counts: codex message, tool-call and request counts (pj-mxs).
+SCHEMA_VERSION = "6"
 
 _SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -45,7 +46,7 @@ CREATE TABLE files(
   size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, list_pos INTEGER NOT NULL,
   session_id TEXT, workspace TEXT, title TEXT,
   started_at INTEGER, ended_at INTEGER, activity_ms INTEGER NOT NULL, model TEXT,
-  tokens TEXT,
+  tokens TEXT, counts TEXT,
   s_session_id TEXT, s_workspace TEXT, s_title TEXT,
   s_started_at INTEGER, s_ended_at INTEGER, s_model TEXT,
   first_rowid INTEGER, last_rowid INTEGER,
@@ -302,13 +303,13 @@ def _insert_file(conn: sqlite3.Connection, path: str, parser, pos: int,
     cur = conn.execute(
         "INSERT INTO files(path, agent, size, mtime_ns, list_pos,"
         " session_id, workspace, title, started_at, ended_at, activity_ms, model,"
-        " tokens,"
+        " tokens, counts,"
         " s_session_id, s_workspace, s_title, s_started_at, s_ended_at, s_model,"
         " first_rowid, last_rowid,"
         " t_session_id, t_workspace, t_title, t_started_at, t_ended_at, t_model,"
         " t_first_rowid, t_last_rowid)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-        " ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (path, parser.agent_slug, st.size, st.mtime_ns, pos,
          *_fresh_fields(meta, session), first, last,
          *_session_fields(tree), tree.model if tree else None, t_first, t_last))
@@ -398,13 +399,13 @@ def _verify(conn: sqlite3.Connection, sample_size: int, rng: random.Random) -> d
 
 
 _FIELDS = ("session_id, workspace, title, started_at, ended_at, activity_ms, model,"
-           " tokens, s_session_id, s_workspace, s_title, s_started_at, s_ended_at, s_model")
+           " tokens, counts, s_session_id, s_workspace, s_title, s_started_at, s_ended_at, s_model")
 
 
 def _fresh_fields(meta, session) -> tuple:
     """The _FIELDS values _insert_file would store for this parse."""
     return (*_session_fields(meta), fs_store._activity_ms(meta) if meta else 0,
-            meta.model if meta else None, _tokens_json(meta),
+            meta.model if meta else None, _tokens_json(meta), _counts_json(meta),
             *_session_fields(session),
             session.model if session else None)
 
@@ -412,6 +413,11 @@ def _fresh_fields(meta, session) -> tuple:
 def _tokens_json(meta) -> str | None:
     tokens = meta.tokens if meta else None
     return json.dumps(tokens, sort_keys=True) if tokens else None
+
+
+def _counts_json(meta) -> str | None:
+    counts = meta.counts if meta else None
+    return json.dumps(counts, sort_keys=True) if counts else None
 
 
 def _rows_by_id(conn: sqlite3.Connection, file_ids: list[int]) -> dict:
@@ -712,7 +718,8 @@ def _stored_metadata(row):
         session_id=row["session_id"], agent=row["agent"], source_path=row["path"],
         workspace=row["workspace"], title=row["title"],
         started_at=row["started_at"], ended_at=row["ended_at"], model=row["model"],
-        tokens=json.loads(row["tokens"]) if row["tokens"] else None)
+        tokens=json.loads(row["tokens"]) if row["tokens"] else None,
+        counts=json.loads(row["counts"]) if row["counts"] else None)
 
 
 def _stored_full(conn: sqlite3.Connection, row) -> dict | None:

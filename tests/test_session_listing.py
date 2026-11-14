@@ -5,6 +5,7 @@ pj-6tr: a Codex rollout with no messages was listed by `pj chats`, dated by a
 pj-8hj: `pj chat` said "not found" for an id `pj chats` listed.
 pj-tej: Codex token totals were always null in `pj chats`.
 pj-s8u: recency must come from the last entry timestamp, never file mtime.
+pj-mxs: Codex message, tool-call and API-call counts were always null.
 
 Every check runs against fs_store and against the index, which must agree.
 """
@@ -157,6 +158,42 @@ def test_codex_token_totals_come_from_the_last_token_count(store, corpus):
 def test_sessions_without_token_counts_keep_null_totals(store, corpus):
     for summary in store.project_sessions("/w/gamma") + store.project_sessions("/w/alpha"):
         assert summary["input_tokens"] is None and summary["total_tokens"] is None
+
+
+# --- pj-mxs: Codex message, tool-call and request counts ---
+
+def test_codex_counts_skip_injected_context(store, corpus):
+    # Codex injects environment context and AGENTS.md as role=user messages;
+    # only typed prompts count.  Each request logs one token_count with info.
+    path = _rollout(corpus, "m1", 14, [
+        _meta("m1", 14, 14),
+        _msg("user", "<environment_context>\n  <cwd>/w/gamma</cwd>", 14, 1),
+        _msg("user", "# AGENTS.md instructions for /w/gamma", 14, 1),
+        _msg("user", "first prompt", 14, 2),
+        {"type": "response_item", "timestamp": _iso(14, 3),
+         "payload": {"type": "function_call", "call_id": "c1", "name": "shell",
+                     "arguments": "{}"}},
+        {"type": "response_item", "timestamp": _iso(14, 4),
+         "payload": {"type": "custom_tool_call", "call_id": "c2", "name": "apply_patch",
+                     "input": "..."}},
+        _count(14, 5, total=1000, last=1000),
+        _msg("assistant", "done", 14, 6),
+        _count(14, 7, total=2400, last=1400),
+        _event("token_count", 14, 8, info=None),        # rate-limit only: not a request
+        _msg("user", "second prompt", 14, 9),
+        _msg("assistant", "", 14, 10),                  # empty: not a message
+        _msg("assistant", "again", 14, 11),
+        _count(14, 12, total=3000, last=600),
+    ])
+    expected = {"user_messages": 2, "assistant_messages": 2, "tool_calls": 2, "api_calls": 3}
+    assert codex.parse_metadata(path).counts == expected
+    [summary] = [s for s in store.project_sessions("/w/gamma") if s["session_id"] == "m1"]
+    assert {k: summary[k] for k in expected} == expected
+
+
+def test_sessions_without_counts_keep_null_counts(store, corpus):
+    for summary in store.project_sessions("/w/alpha"):
+        assert summary["user_messages"] is None and summary["tool_calls"] is None
 
 
 # --- pj-s8u: recency is the last entry timestamp, not the file mtime ---
